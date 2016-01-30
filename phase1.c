@@ -36,7 +36,7 @@ int pid = -1;
  
 /* number of processes */ 
 int numProcs = 0;
-USLOSS_Context OS_context;
+USLOSS_Context dispatcher_context;
  
 static int sentinel(void *arg);
 static void launch(void);
@@ -50,7 +50,7 @@ static void launch(void);
    Side Effects - runs a process
    ----------------------------------------------------------------------- */
  
-void dispatcher()
+void dispatcher(void)
 {
   /*
    * Run the highest priority runnable process. There is guaranteed to be one
@@ -63,7 +63,7 @@ void dispatcher()
    		 for(j = 0; j < P1_MAXPROC;j++){
         		if(procTable[j].used == 1 && procTable[j].priority == curr_priority){
 				pid = j;
-				USLOSS_ContextSwitch(&OS_context,&procTable[j].context);
+				USLOSS_ContextSwitch(&dispatcher_context,&procTable[j].context);
                 		goto done;
         		}
     		}
@@ -101,7 +101,9 @@ void startup()
   /* start the P2_Startup process */
   P1_Fork("P2_Startup", P2_Startup, NULL, 4 * USLOSS_MIN_STACK, 1);
 
-  dispatcher();
+  void *stack = malloc(USLOSS_MIN_STACK);
+  USLOSS_ContextInit(&dispatcher_context, USLOSS_PsrGet(), stack,USLOSS_MIN_STACK, &dispatcher);
+  USLOSS_ContextSwitch(NULL,&dispatcher_context);
  
   /* Should never get here (sentinel will call USLOSS_Halt) */
  
@@ -163,6 +165,7 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize, int priority
     USLOSS_ContextInit(&(procTable[newPid].context), USLOSS_PsrGet(), stack, 
         stacksize, launch);
     numProcs++;
+    /* USLOSS_ContextSwitch(&(procTable[pid].context),&dispatcher_context); */
     return newPid;
 } /* End of fork */
  
@@ -194,7 +197,7 @@ void P1_Quit(int status) {
   // Do something here.
   procTable[pid].used = 0;
   numProcs--;
-  USLOSS_ContextSwitch(NULL,&OS_context);
+  USLOSS_ContextSwitch(NULL,&dispatcher_context);
 }
  
  
@@ -215,7 +218,6 @@ int sentinel (void *notused)
     {
         /* Check for deadlock here */
         USLOSS_WaitInt();
-        USLOSS_Console("Here\n");
     }
     USLOSS_Halt(0);
     /* Never gets here. */
