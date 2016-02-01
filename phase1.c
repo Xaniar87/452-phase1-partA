@@ -12,6 +12,8 @@
 #include "phase1.h"
 #include <stdlib.h>
 #include <stdio.h>
+
+typedef enum States {UNUSED,RUNNING,READY,KILLED,QUIT,WAITING} State;
  
 /* -------------------------- Globals ------------------------------------- */
  
@@ -20,9 +22,9 @@ typedef struct PCB {
     USLOSS_Context      context;
     int                 (*startFunc)(void *);   /* Starting function */
     void                 *startArg;             /* Arg to starting function */
-    int                  used;
-    int                  kidPid;
+    int                  parentPid;
     int                  priority;
+    State                state;
 } PCB;
  
 #define LOWEST_PRIORITY 6
@@ -37,6 +39,8 @@ int pid = -1;
 /* number of processes */ 
 int numProcs = 0;
 USLOSS_Context dispatcher_context;
+
+int startUpDone = 0;
  
 static int sentinel(void *arg);
 static void launch(void);
@@ -61,7 +65,7 @@ void dispatcher(void)
 	int j;
 	for(curr_priority = HIGHEST_PRIORITY; curr_priority < LOWEST_PRIORITY + 1;curr_priority++){
    		 for(j = 0; j < P1_MAXPROC;j++){
-        		if(procTable[j].used == 1 && procTable[j].priority == curr_priority){
+        		if(procTable[j].state == READY && procTable[j].priority == curr_priority){
 				pid = j;
 				USLOSS_ContextSwitch(&dispatcher_context,&procTable[j].context);
                 		goto done;
@@ -103,6 +107,7 @@ void startup()
 
   void *stack = malloc(USLOSS_MIN_STACK);
   USLOSS_ContextInit(&dispatcher_context, USLOSS_PsrGet(), stack,USLOSS_MIN_STACK, &dispatcher);
+  startUpDone = 1;
   USLOSS_ContextSwitch(NULL,&dispatcher_context);
  
   /* Should never get here (sentinel will call USLOSS_Halt) */
@@ -146,10 +151,10 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize, int priority
     /* newPid = pid of empty PCB here */
     int i = 0;
     for(i = 0; i < P1_MAXPROC;i++){
-	if(procTable[i].used == 0){
+	if(procTable[i].state == UNUSED){
 		newPid = i;
-		procTable[i].used = 1;
-		procTable[i].kidPid = pid;
+		procTable[i].state = READY;
+		procTable[i].parentPid = pid;
 		procTable[i].priority = priority;
 		break;
 	}
@@ -165,7 +170,10 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize, int priority
     USLOSS_ContextInit(&(procTable[newPid].context), USLOSS_PsrGet(), stack, 
         stacksize, launch);
     numProcs++;
-    /* USLOSS_ContextSwitch(&(procTable[pid].context),&dispatcher_context); */
+    if(startUpDone){
+	procTable[pid].state = READY;
+    	USLOSS_ContextSwitch(&(procTable[pid].context),&dispatcher_context);
+    }
     return newPid;
 } /* End of fork */
  
@@ -195,7 +203,13 @@ void launch(void)
    ------------------------------------------------------------------------ */
 void P1_Quit(int status) {
   // Do something here.
-  procTable[pid].used = 0;
+  procTable[pid].state = UNUSED;
+  int i;
+  for(i = 0; i < P1_MAXPROC;i++){
+	if(procTable[i].parentPid == pid){
+      	  procTable[i].parentPid = -1;
+	}
+  }
   numProcs--;
   USLOSS_ContextSwitch(NULL,&dispatcher_context);
 }
@@ -224,10 +238,30 @@ int sentinel (void *notused)
     return 0;
 } /* End of sentinel */
 
+
+int P1_GetPID(void){
+	return pid;
+}
+
+int P1_GetState(int pid){
+	if(pid >= 0 && pid < P1_MAXPROC){
+		if(procTable[pid].state == RUNNING){
+			return 0;
+		}else if(procTable[pid].state == READY){
+			return 1;
+		}else if(procTable[pid].state == KILLED){
+			return 2;
+		}
+		return 3;
+	}
+	/* Invalid pid */
+	return -1;
+}
+
 void P1_DumpProcesses(void){
 	int i;
 	for(i = 0; i < P1_MAXPROC;i++){
-		if(procTable[i].used == 1){
+		if(procTable[i].state != UNUSED){
 			printf("%s\n",procTable[i].name);
 		}
 	}
