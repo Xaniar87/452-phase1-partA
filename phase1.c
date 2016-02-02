@@ -25,6 +25,13 @@ typedef struct PCB {
     int                  parentPid;
     int                  priority;
     State                state;
+    //need variable to measure # of children and CPU time usage
+    int 		numChildren;
+    int 		cpuTime;
+    int 		startTime; 
+    // also a variable to store the PID
+    int 			pid;
+    // list of child PIDs 
 } PCB;
  
 #define LOWEST_PRIORITY 6
@@ -35,6 +42,10 @@ PCB procTable[P1_MAXPROC];
   
 /* current process ID */
 int pid = -1;
+
+/*variables to measure CPU usage time for processes
+ints will represent microseconds		*/
+int startTime = 0;
  
 /* number of processes */ 
 int numProcs = 0;
@@ -68,7 +79,8 @@ void dispatcher(void)
         		if(procTable[j].state == READY && procTable[j].priority == curr_priority){
 				pid = j;
 				USLOSS_ContextSwitch(&dispatcher_context,&procTable[j].context);
-                		goto done;
+                		startTime = USLOSS_Clock();
+				goto done;
         		}
     		}
 	}
@@ -87,8 +99,21 @@ void dispatcher(void)
 void startup()
 {
  
-  /* initialize the process table here */
- 
+  /* initialize the process table here 
+     loop through array and initialize base values for PCP*/
+	int i;
+	for (i = 0; i < P1_MAXPROC;i++){
+		procTable[i].state = UNUSED;
+		procTable[i].cpuTime = 0;
+		procTable[numChildren] = 0;
+		procTable[pid] = -1;
+		procTable[parentPid] = -1;
+		procTable[priority] = -1;
+	
+		
+	}  
+
+
   /* Initialize the Ready list, Blocked list, etc. here */
  
   /* Initialize the interrupt vector here */
@@ -153,9 +178,14 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize, int priority
     for(i = 0; i < P1_MAXPROC;i++){
 	if(procTable[i].state == UNUSED){
 		newPid = i;
+		procTable[i].pid = i;
 		procTable[i].state = READY;
 		procTable[i].parentPid = pid;
 		procTable[i].priority = priority;
+		// increment the current process's children count for it 
+		procTable[pid].numChildren = procTable[pid].numChildren + 1;
+		// just created a new child, add it to the parents list of children
+		
 		break;
 	}
     }
@@ -172,6 +202,7 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize, int priority
     numProcs++;
     if(startUpDone){
 	procTable[pid].state = READY;
+	// switching contexts so get new start time from cpu
     	USLOSS_ContextSwitch(&(procTable[pid].context),&dispatcher_context);
     }
     return newPid;
@@ -251,18 +282,40 @@ int P1_GetState(int pid){
 			return 1;
 		}else if(procTable[pid].state == KILLED){
 			return 2;
+		}else{
+			return 3;
 		}
-		return 3;
 	}
 	/* Invalid pid */
 	return -1;
 }
-
+/*
+print process info to console for debuggin purposes
+for each PCB in process table, print its PID, parents PID, 
+priority,process state,# of chilren,CPU time consumed,and name
+*/
 void P1_DumpProcesses(void){
 	int i;
 	for(i = 0; i < P1_MAXPROC;i++){
 		if(procTable[i].state != UNUSED){
-			printf("%s\n",procTable[i].name);
+			//print name
+			printf("PROCESS: %s\n",procTable[i].name);
+			//print PID
+			printf("PID: %d",procTable[i].pid );
+			//print parents PID
+			printf("Parents PID: %d",procTable[i].parentPid);
+			//print priority
+			printf("Priority: %d",procTable[i].priority); 
+			//print process state
+			printf("Priority: %s", procTable[i].state);
+			//print # of children
+			printf("# of Children: %d", procTable[i].childrenCount);
+			//print CPU time consumed
+			printf("CPU time consumed: %d\n", procTable[i].cpuTime);
 		}
 	}
+}
+
+int P1_ReadTime(void){
+	return USLOSS_CLOCK - startTime;
 }
