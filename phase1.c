@@ -44,9 +44,6 @@ PCB procTable[P1_MAXPROC];
 /* current process ID */
 int pid = -1;
 
-/*variables to measure CPU usage time for processes
-ints will represent microseconds		*/
-int startTime = 0;
  
 /* number of processes */ 
 int numProcs = 0;
@@ -80,8 +77,11 @@ void dispatcher(void)
    		 for(j = 0; j < P1_MAXPROC;j++){
         		if(procTable[j].state == READY && procTable[j].priority == curr_priority){
 				pid = j;
+				procTable[j].state = RUNNING;
+				procTable[j].startTime = USLOSS_Clock();
 				USLOSS_ContextSwitch(&dispatcher_context,&procTable[j].context);
-                		startTime = USLOSS_Clock();
+				int finTime = USLOSS_Clock();
+                		procTable[j].cpuTime = (procTable[j].cpuTime + (finTime - procTable[j].startTime));
 				goto done;
         		}else if(procTable[j].state == KILLED && procTable[j].priority == curr_priority){
 				pid = j;
@@ -114,7 +114,7 @@ void startup()
 		procTable[i].numChildren = 0;
 		procTable[i].pid = -1;
 		procTable[i].parentPid = -1;
-		procTable[i].cpuTime = -1;
+		procTable[i].cpuTime = 0;
 		procTable[i].killedStatus = 0;
 	}  
 
@@ -316,19 +316,37 @@ void P1_DumpProcesses(void){
 	for(i = 0; i < P1_MAXPROC;i++){
 		if(procTable[i].state != UNUSED){
 			//print name
-			printf("PROCESS: %s\n",procTable[i].name);
+			printf("%s\t",procTable[i].name);
 			//print PID
-			printf("PID: %d",procTable[i].pid );
+			printf("PID: %d\t",procTable[i].pid );
 			//print parents PID
-			printf("Parents PID: %d",procTable[i].parentPid);
+			printf("Parents PID: %d\t",procTable[i].parentPid);
 			//print priority
-			printf("Priority: %d",procTable[i].priority); 
+			printf("Priority: %d\t",procTable[i].priority); 
 			//print process state
-			printf("Priority: %d", procTable[i].state);
+			if(procTable[i].state == RUNNING)  {
+                                printf("State: RUNNING\t");
+                        }
+			if(procTable[i].state == READY)  {
+                                printf("State: READY\t");
+                        }
+			if(procTable[i].state == KILLED)  {
+                                printf("State: KILLED\t");
+                        }
+			if(procTable[i].state == QUIT)  {
+                                printf("State: QUIT\t");
+                        }
+			if(procTable[i].state == BLOCKED)  {
+                                printf("State: BLOCKED\t");
+                        }
 			//print # of children
-			printf("# of Children: %d", procTable[i].numChildren);
+			printf("# of Children: %d\t", procTable[i].numChildren);
 			//print CPU time consumed
-			printf("CPU time consumed: %d\n", procTable[i].cpuTime);
+			if (i == pid){
+				printf("CPU time consumed: %d\n", P1_ReadTime());
+			}else {
+				printf("CPU time consumed: %d\n", procTable[i].cpuTime);
+			}
 		}
 	}
 }
@@ -348,5 +366,6 @@ int P1_Kill(int p,int status){
 }
 
 int P1_ReadTime(void){
-	return USLOSS_Clock() - startTime;
+                int finTime = USLOSS_Clock();
+               	return (procTable[pid].cpuTime + (finTime - procTable[pid].startTime));	
 }
