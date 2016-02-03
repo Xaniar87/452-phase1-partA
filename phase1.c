@@ -313,40 +313,40 @@ priority,process state,# of chilren,CPU time consumed,and name
 
 void P1_DumpProcesses(void){
 	int i;
+	char string[5000] = {'\0'};
+	int bytes = 0;
+	bytes += sprintf(string,"%-20s%-20s%-20s%-20s%-20s%-20s%-20s","Process Name","Pid","Parent Pid","Priority","State","# of Children","CPU time");
+	printf("%s\n",string);
 	for(i = 0; i < P1_MAXPROC;i++){
 		if(procTable[i].state != UNUSED){
-			//print name
-			printf("%s\t",procTable[i].name);
-			//print PID
-			printf("PID: %d\t",procTable[i].pid );
-			//print parents PID
-			printf("Parents PID: %d\t",procTable[i].parentPid);
-			//print priority
-			printf("Priority: %d\t",procTable[i].priority); 
-			//print process state
+			bytes = 0;
+			string[0] = 0;
+			bytes += sprintf(string,"%-20s",procTable[i].name);
+			bytes += sprintf(string+bytes,"%-20d",procTable[i].pid );
+			bytes += sprintf(string+bytes,"%-20d",procTable[i].parentPid);
+			bytes += sprintf(string+bytes,"%-20d",procTable[i].priority); 
 			if(procTable[i].state == RUNNING)  {
-                                printf("State: RUNNING\t");
+                                bytes+=sprintf(string+bytes,"%-20s","RUNNING");
                         }
 			if(procTable[i].state == READY)  {
-                                printf("State: READY\t");
+                                bytes+=sprintf(string+bytes,"%-20s","READY");
                         }
 			if(procTable[i].state == KILLED)  {
-                                printf("State: KILLED\t");
+                                bytes+=sprintf(string+bytes,"%-20s","KILLED");
                         }
 			if(procTable[i].state == QUIT)  {
-                                printf("State: QUIT\t");
+                                bytes+=sprintf(string+bytes,"%-20s","QUIT");
                         }
 			if(procTable[i].state == BLOCKED)  {
-                                printf("State: BLOCKED\t");
+                                bytes+=sprintf(string+bytes,"%-20s","BLOCKED");
                         }
-			//print # of children
-			printf("# of Children: %d\t", procTable[i].numChildren);
-			//print CPU time consumed
+			bytes+=sprintf(string+bytes,"%-20d", procTable[i].numChildren);
 			if (i == pid){
-				printf("CPU time consumed: %d\n", P1_ReadTime());
+				bytes+=sprintf(string+bytes,"%-20d\n", P1_ReadTime());
 			}else {
-				printf("CPU time consumed: %d\n", procTable[i].cpuTime);
+				bytes+=sprintf(string+bytes,"%-20d\n", procTable[i].cpuTime);
 			}
+			USLOSS_Console(string);
 		}
 	}
 }
