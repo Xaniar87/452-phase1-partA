@@ -54,7 +54,6 @@ int startUpDone = 0;
  
 static int sentinel(void *arg);
 static void launch(void);
-void Private_Quit(int status);
 
 /*
 0 == we are in kernel mode. continue.
@@ -89,19 +88,17 @@ void dispatcher(void)
 	int j;
 	for(curr_priority = HIGHEST_PRIORITY; curr_priority < LOWEST_PRIORITY + 1;curr_priority++){
    		 for(j = 0; j < P1_MAXPROC;j++){
-        		if(procTable[j].state == READY && procTable[j].priority == curr_priority){
+        		if((procTable[j].state != UNUSED && procTable[j].state != BLOCKED) && procTable[j].priority == curr_priority){
 				pid = j;
-				procTable[j].state = RUNNING;
+				if(procTable[j].state == READY){
+					procTable[j].state = RUNNING;
+				}
 				procTable[j].startTime = USLOSS_Clock();
 				USLOSS_ContextSwitch(&dispatcher_context,&procTable[j].context);
 				int finTime = USLOSS_Clock();
                 		procTable[j].cpuTime = (procTable[j].cpuTime + (finTime - procTable[j].startTime));
 				goto done;
-        		}else if(procTable[j].state == KILLED && procTable[j].priority == curr_priority){
-				pid = j;
-				Private_Quit(procTable[j].killedStatus);
-				goto done;
-			}
+        		}
     		}
 	}
 	done:;
@@ -227,7 +224,9 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize, int priority
         stacksize, launch);
     numProcs++;
     if(startUpDone && (priority < procTable[pid].priority)){
-	procTable[pid].state = READY;
+	if(procTable[pid].state == RUNNING){
+		procTable[pid].state = READY;
+	}
 	// switching contexts so get new start time from cpu
     	USLOSS_ContextSwitch(&(procTable[pid].context),&dispatcher_context);
     }
@@ -270,18 +269,6 @@ void P1_Quit(int status) {
   numProcs--;
   USLOSS_ContextSwitch(NULL,&dispatcher_context);
 }
-
-void Private_Quit(int status){
-  procTable[pid].state = UNUSED;
-  int i;
-  for(i = 0; i < P1_MAXPROC;i++){
-        if(procTable[i].parentPid == pid){
-          procTable[i].parentPid = -1;
-        }
-  }
-  numProcs--;
-}
- 
  
 /* ------------------------------------------------------------------------
    Name - sentinel
@@ -327,6 +314,8 @@ int P1_GetState(int pid){
 			return 1;
 		}else if(procTable[pid].state == KILLED){
 			return 2;
+		}else if(procTable[pid].state == BLOCKED){
+			return 4;
 		}else{
 			return 3;
 		}
