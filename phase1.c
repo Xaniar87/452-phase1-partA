@@ -54,6 +54,19 @@ int startUpDone = 0;
 static int sentinel(void *arg);
 static void launch(void);
 void Private_Quit(int status);
+
+/*
+0 == we are in kernel mode. continue.
+1 == we are not in kernel mode. error message.
+*/
+int permissionCheck(void){
+	if((USLOSS_PsrGet() & 0x1) != 1){
+		USLOSS_Console("Must be in Kernel mode to perform this request. Quitting.\n");
+		return 1;
+	}
+	return 0;
+}
+
  
 /* -------------------------- Functions ----------------------------------- */
 /* ------------------------------------------------------------------------
@@ -170,6 +183,10 @@ void finish()
    ------------------------------------------------------------------------ */
 int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize, int priority)
 {
+    if(permissionCheck()){
+	P1_Quit(1);
+	return -1;
+    }
     if(stacksize < USLOSS_MIN_STACK){
         return -2;
     }
@@ -290,6 +307,10 @@ int P1_GetPID(void){
 }
 
 int P1_GetState(int pid){
+    	if(permissionCheck()){
+        	P1_Quit(1);
+        	return -1;
+    	}
 	if(pid >= 0 && pid < P1_MAXPROC){
 		if(procTable[pid].state == RUNNING){
 			return 0;
@@ -312,6 +333,10 @@ priority,process state,# of chilren,CPU time consumed,and name
 */
 
 void P1_DumpProcesses(void){
+        if(permissionCheck()){
+                P1_Quit(1);
+  		return;
+        }
 	int i;
 	char string[5000] = {'\0'};
 	int bytes = 0;
@@ -352,6 +377,10 @@ void P1_DumpProcesses(void){
 }
 
 int P1_Kill(int p,int status){
+        if(permissionCheck()){
+                P1_Quit(1);
+                return -1;
+        }
 	if(p == pid){
 		return -2;
 	}
@@ -366,6 +395,10 @@ int P1_Kill(int p,int status){
 }
 
 int P1_ReadTime(void){
+        	if(permissionCheck()){
+                	P1_Quit(1);
+                	return -1;
+        	}
                 int finTime = USLOSS_Clock();
                	return (procTable[pid].cpuTime + (finTime - procTable[pid].startTime));	
 }
