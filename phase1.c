@@ -12,6 +12,7 @@
 #include "phase1.h"
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 
 typedef enum States {UNUSED,RUNNING,READY,KILLED,QUIT,BLOCKED} State;
  
@@ -190,8 +191,12 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize, int priority
     if(stacksize < USLOSS_MIN_STACK){
         return -2;
     }
-    if(priority < 0 || priority > 6){
-	return -3;
+    if(priority < 0 || priority > 5){
+	if(priority == 6 && strcmp(name,"sentinel") == 0){
+		;
+	}else{
+		return -3;
+	}
     }
     int newPid = -1;
     void *stack = NULL;
@@ -221,7 +226,7 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize, int priority
     USLOSS_ContextInit(&(procTable[newPid].context), USLOSS_PsrGet(), stack, 
         stacksize, launch);
     numProcs++;
-    if(startUpDone){
+    if(startUpDone && (priority < procTable[pid].priority)){
 	procTable[pid].state = READY;
 	// switching contexts so get new start time from cpu
     	USLOSS_ContextSwitch(&(procTable[pid].context),&dispatcher_context);
@@ -303,6 +308,10 @@ int sentinel (void *notused)
 
 
 int P1_GetPID(void){
+        if(permissionCheck()){
+                P1_Quit(1);
+                return -1;
+        }
 	return pid;
 }
 
@@ -340,7 +349,7 @@ void P1_DumpProcesses(void){
 	int i;
 	char string[5000] = {'\0'};
 	int bytes = 0;
-	bytes += sprintf(string,"%-20s%-20s%-20s%-20s%-20s%-20s%-20s","Process Name","Pid","Parent Pid","Priority","State","# of Children","CPU time");
+	bytes += sprintf(string,"%-20s%-20s%-20s%-20s%-20s%-20s%-20s","Process Name","Pid","Parent Pid","Priority","State","# of Children","CPU time(uS)");
 	printf("%s\n",string);
 	for(i = 0; i < P1_MAXPROC;i++){
 		if(procTable[i].state != UNUSED){
