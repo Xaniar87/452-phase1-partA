@@ -182,7 +182,6 @@ void finish()
 int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize, int priority)
 {
     if(permissionCheck()){
-	P1_Quit(1);
 	return -1;
     }
     if(stacksize < USLOSS_MIN_STACK){
@@ -218,7 +217,7 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize, int priority
     }
     procTable[newPid].startFunc = f;
     procTable[newPid].startArg = arg;
-    procTable[newPid].name = name;
+    procTable[newPid].name = strdup(name);
     stack = malloc(stacksize);
     USLOSS_ContextInit(&(procTable[newPid].context), USLOSS_PsrGet(), stack, 
         stacksize, launch);
@@ -296,7 +295,6 @@ int sentinel (void *notused)
 
 int P1_GetPID(void){
         if(permissionCheck()){
-                P1_Quit(1);
                 return -1;
         }
 	return pid;
@@ -304,7 +302,6 @@ int P1_GetPID(void){
 
 int P1_GetState(int pid){
     	if(permissionCheck()){
-        	P1_Quit(1);
         	return -1;
     	}
 	if(pid >= 0 && pid < P1_MAXPROC){
@@ -332,7 +329,6 @@ priority,process state,# of chilren,CPU time consumed,and name
 
 void P1_DumpProcesses(void){
         if(permissionCheck()){
-                P1_Quit(1);
   		return;
         }
 	int i;
@@ -374,9 +370,8 @@ void P1_DumpProcesses(void){
 	}
 }
 
-int P1_Kill(int p,int status){
+int P1_Kill(int p){
         if(permissionCheck()){
-                P1_Quit(1);
                 return -1;
         }
 	if(p == pid){
@@ -385,7 +380,7 @@ int P1_Kill(int p,int status){
 	if(p >= 0 && p < P1_MAXPROC){
 		if(procTable[p].state == READY || procTable[p].state == BLOCKED){
 			procTable[p].state = KILLED;
-			procTable[p].killedStatus = status;
+			procTable[p].killedStatus = 0;
 		}
 		return 0;
 	}
@@ -394,7 +389,6 @@ int P1_Kill(int p,int status){
 
 int P1_ReadTime(void){
         	if(permissionCheck()){
-                	P1_Quit(1);
                 	return -1;
         	}
                 int finTime = USLOSS_Clock();

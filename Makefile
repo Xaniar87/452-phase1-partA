@@ -28,7 +28,7 @@ USLOSS_VERSION = 2.11
 SRCS = phase1.c
 
 # Add any tests here. If the test is named test0 then the source file is assumed to be test0.c.
-TESTS = test0
+TESTS = test0 test1 test2 test3 test4 test5 test6 test7 test8 test9 test10
 
 # Change this if you want to change the arguments to valgrind.
 VGFLAGS = --track-origins=yes --leak-check=full --max-stackframe=100000
@@ -36,7 +36,6 @@ VGFLAGS = --track-origins=yes --leak-check=full --max-stackframe=100000
 # Change this if you need to link against additional libraries (probably not).
 LIBS = -lusloss$(USLOSS_VERSION) -lphase1
 
-# Change this if you want change which flags are passed to the C compiler.
 CFLAGS += -Wall -g
 CFLAGS += -DDEBUG
 

@@ -31,7 +31,7 @@ extern  int             P1_Fork(char *name, int(*func)(void *), void *arg,
                                 int stackSize, int priority);
 extern  void            P1_Quit(int status);
 extern  int             P1_Join(int *status);
-extern  int             P1_Kill(int pid, int status);
+extern  int             P1_Kill(int pid);
 extern  int             P1_GetPID(void);
 extern  int             P1_GetState(int pid);
 extern  void            P1_DumpProcesses(void);
