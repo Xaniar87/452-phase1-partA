@@ -26,14 +26,11 @@ typedef struct PCB {
     int                  parentPid;
     int                  priority;
     State                state;
-    //need variable to measure # of children and CPU time usage
     int 		numChildren;
     int 		cpuTime;
     int 		startTime; 
-    // also a variable to store the PID
-    int 		pid;
     int 		killedStatus;
-    // list of child PIDs 
+    void*               processStack;
 } PCB;
  
 #define LOWEST_PRIORITY 6
@@ -123,7 +120,6 @@ void startup()
 		procTable[i].state = UNUSED;
 		procTable[i].cpuTime = 0;
 		procTable[i].numChildren = 0;
-		procTable[i].pid = -1;
 		procTable[i].parentPid = -1;
 		procTable[i].cpuTime = 0;
 		procTable[i].killedStatus = 0;
@@ -201,13 +197,15 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize, int priority
     for(i = 0; i < P1_MAXPROC;i++){
 	if(procTable[i].state == UNUSED){
 		newPid = i;
-		procTable[i].pid = i;
 		procTable[i].state = READY;
 		procTable[i].parentPid = pid;
 		procTable[i].priority = priority;
 		// increment the current process's children count for it 
 		procTable[pid].numChildren = procTable[pid].numChildren + 1;
-		// just created a new child, add it to the parents list of children
+		if(procTable[pid].processStack != NULL){
+			free(procTable[i].processStack);
+			procTable[i].processStack = NULL;
+		}
 		break;
 	}
     }
@@ -219,6 +217,7 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize, int priority
     procTable[newPid].startArg = arg;
     procTable[newPid].name = strdup(name);
     stack = malloc(stacksize);
+    procTable[newPid].processStack = stack;
     USLOSS_ContextInit(&(procTable[newPid].context), USLOSS_PsrGet(), stack, 
         stacksize, launch);
     numProcs++;
@@ -341,7 +340,7 @@ void P1_DumpProcesses(void){
 			bytes = 0;
 			string[0] = 0;
 			bytes += sprintf(string,"%-20s",procTable[i].name);
-			bytes += sprintf(string+bytes,"%-20d",procTable[i].pid );
+			bytes += sprintf(string+bytes,"%-20d",i );
 			bytes += sprintf(string+bytes,"%-20d",procTable[i].parentPid);
 			bytes += sprintf(string+bytes,"%-20d",procTable[i].priority); 
 			if(procTable[i].state == RUNNING)  {
