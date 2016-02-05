@@ -57,7 +57,7 @@ static void launch(void);
 1 == we are not in kernel mode. error message.
 */
 int permissionCheck(void){
-	if((USLOSS_PsrGet() & 0x1) != 1){
+	if((USLOSS_PsrGet() & 0x1) < 1){
 		USLOSS_Console("Must be in Kernel mode to perform this request. Quitting.\n");
 		return 1;
 	}
@@ -242,7 +242,7 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize, int priority
 void launch(void)
 {
   int  rc;
-  USLOSS_PsrSet(USLOSS_PsrGet() | USLOSS_PSR_CURRENT_INT);
+  //USLOSS_PsrSet(USLOSS_PsrGet() | USLOSS_PSR_CURRENT_INT);
   rc = procTable[pid].startFunc(procTable[pid].startArg);
   /* quit if we ever come back */
   P1_Quit(rc);
@@ -281,6 +281,8 @@ void P1_Quit(int status) {
    ----------------------------------------------------------------------- */
 int sentinel (void *notused)
 {
+    P1_DumpProcesses();
+    USLOSS_Console("IN SENTINEL\n");
     while (numProcs > 1)
     {
         /* Check for deadlock here */
