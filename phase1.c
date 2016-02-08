@@ -256,7 +256,6 @@ void launch(void)
    Side Effects - the currently running process quits
    ------------------------------------------------------------------------ */
 void P1_Quit(int status) {
-  // Do something here.
   procTable[pid].state = UNUSED;
   int i;
   for(i = 0; i < P1_MAXPROC;i++){
@@ -281,8 +280,6 @@ void P1_Quit(int status) {
    ----------------------------------------------------------------------- */
 int sentinel (void *notused)
 {
-    P1_DumpProcesses();
-    USLOSS_Console("IN SENTINEL\n");
     while (numProcs > 1)
     {
         /* Check for deadlock here */
