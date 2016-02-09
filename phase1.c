@@ -56,7 +56,7 @@ static void launch(void);
 */
 int permissionCheck(void){
 	if((USLOSS_PsrGet() & 0x1) < 1){
-		USLOSS_Console("Must be in Kernel mode to perform this request. Quitting.\n");
+		USLOSS_Console("Must be in Kernel mode to perform this request. Stopping requested operation\n");
 		return 1;
 	}
 	return 0;
@@ -256,6 +256,9 @@ void launch(void)
    Side Effects - the currently running process quits
    ------------------------------------------------------------------------ */
 void P1_Quit(int status) {
+  if(permissionCheck()){
+	return;
+  }
   procTable[pid].state = UNUSED;
   procTable[pid].numChildren = 0;
   procTable[pid].startTime = 0;
