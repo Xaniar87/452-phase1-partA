@@ -1,11 +1,9 @@
-  /* ------------------------------------------------------------------------
-   skeleton.c
- 
-   Skeleton file for Phase 1. These routines are very incomplete and are
-   intended to give you a starting point. Feel free to use this or not.
- 
- 
-   ------------------------------------------------------------------------ */
+/*
+452 Phase 1 Part A
+Authors:
+Matt Seall
+Zachary Nixon
+*/
  
 #include <stddef.h>
 #include "usloss.h"
@@ -90,6 +88,7 @@ void dispatcher(void)
 				if(procTable[j].state == READY){
 					procTable[j].state = RUNNING;
 				}
+				/*Calculate CPU usage here*/
 				procTable[j].startTime = USLOSS_Clock();
 				USLOSS_ContextSwitch(&dispatcher_context,&procTable[j].context);
 				int finTime = USLOSS_Clock();
@@ -114,7 +113,7 @@ void startup()
 {
  
   /* initialize the process table here 
-     loop through array and initialize base values for PCP*/
+     loop through array and initialize base values for PCB*/
 	int i;
 	for (i = 0; i < P1_MAXPROC;i++){
 		procTable[i].state = UNUSED;
@@ -142,6 +141,7 @@ void startup()
   /* start the P2_Startup process */
   P1_Fork("P2_Startup", P2_Startup, NULL, 4 * USLOSS_MIN_STACK, 1);
 
+  /*Start the dispatcher here*/
   void *stack = malloc(USLOSS_MIN_STACK);
   USLOSS_ContextInit(&dispatcher_context, USLOSS_PsrGet(), stack,USLOSS_MIN_STACK, &dispatcher);
   startUpDone = 1;
