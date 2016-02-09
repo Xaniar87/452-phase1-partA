@@ -257,7 +257,12 @@ void launch(void)
    ------------------------------------------------------------------------ */
 void P1_Quit(int status) {
   procTable[pid].state = UNUSED;
+  procTable[pid].numChildren = 0;
+  procTable[pid].startTime = 0;
+  procTable[pid].cpuTime = 0;
+  procTable[pid].parentPid = 0;
   int i;
+  // let other processes know that they are orphans by setting parentPID = -1
   for(i = 0; i < P1_MAXPROC;i++){
 	if(procTable[i].parentPid == pid){
       	  procTable[i].parentPid = -1;
@@ -332,7 +337,7 @@ void P1_DumpProcesses(void){
 	int i;
 	char string[5000] = {'\0'};
 	int bytes = 0;
-	bytes += sprintf(string,"%-20s%-20s%-20s%-20s%-20s%-20s%-20s","Process Name","Pid","Parent Pid","Priority","State","# of Children","CPU time(uS)");
+	bytes += sprintf(string,"%-20s%-20s%-20s%-20s%-20s%-20s%-20s","Name","Pid","Parent","Priority","State","# Children","time(uS)");
 	printf("%s\n",string);
 	for(i = 0; i < P1_MAXPROC;i++){
 		if(procTable[i].state != UNUSED){
