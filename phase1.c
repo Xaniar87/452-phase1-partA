@@ -13,7 +13,7 @@
 #include <string.h>
 
 typedef enum States {
-	UNUSED, RUNNING, READY, KILLED, QUIT, BLOCKED
+	UNUSED, RUNNING, READY, KILLED, QUIT
 } State;
 
 /* -------------------------- Globals ------------------------------------- */
@@ -25,13 +25,14 @@ typedef struct PCB {
 	void *startArg; /* Arg to starting function */
 	int parentPid;
 	int priority;
-	State state;
-	int numChildren;
-	int cpuTime;
-	int startTime;
-	int killedStatus;
+	State state; /* Process state */
+	int numChildren; /* Number of child processes */
+	int cpuTime; /*Total time used by process*/
+	int startTime; /*Time when the Process started running*/
+	int killedStatus; /* status given to process by kill() */
 	int pid;
-	void* processStack;
+	int blocked; /*Is this process blocked?*/
+	void* processStack; /*Process stack for context*/
 } PCB;
 
 typedef struct node {
@@ -39,69 +40,57 @@ typedef struct node {
 	struct node *next;
 } queueNode;
 
+typedef struct semaphore {
+	int count;
+	int id;
+	int inUse;
+	queueNode *next;
+} semaphore;
+
 #define LOWEST_PRIORITY 6
 #define HIGHEST_PRIORITY 0
 
 /* the process table */
 PCB procTable[P1_MAXPROC];
 
+/*Array of semaphores*/
+semaphore semaphoreTable[P1_MAXSEM];
+
 queueNode *readyQueue = NULL;
-queueNode *blockedQueue = NULL;
 
 /* current process ID */
 int pid = -1;
 
 /* number of processes */
 int numProcs = 0;
+int numSemaphores = 0;
 USLOSS_Context dispatcher_context;
 
+/* Flag for Fork - Determines if we should invoke dispatcher*/
 int startUpDone = 0;
 
+/* OS control functions */
 static int sentinel(void *arg);
 static void launch(void);
-PCB * queuePriorityPop(int ready);
-void queueInsert(PCB *pcb, int ready);
+void interruptsOff(void);
+void interruptsOn(void);
 
-void syscallHandler(int type,void *arg){
-        char string[50];
-        sprintf(string,"System call %d not implemented\n",type);
-        P1_Quit(1);
-}
+/* Interrupt Handlers */
+void syscallHandler(int type,void *arg);
+void clockIntHandler(int type, void *arg);
+void countDownIntHandler(int type, void *arg);
+void terminalIntHandler(int type, void *arg);
+void diskIntHandler(int type, void *arg);
+void MMUIntHandler(int type, void *arg);
 
-void clockIntHandler(int type, void *arg){
-	printf("Clock int\n");
-}
+/*Queue functions*/
+PCB * queuePop(queueNode **head);
+void queuePriorityInsert(PCB *pcb, queueNode **head);
+void queueInsert(PCB *pcb, queueNode **head);
 
-void countDownIntHandler(int type, void *arg){
-	return;
-}
+/*Misc*/
+int permissionCheck(void);
 
-void terminalIntHandler(int type, void *arg){
-	return;
-}
-
-void diskIntHandler(int type, void *arg){
-	return;
-}
-
-void MMUIntHandler(int type, void *arg){
-	return;
-}
-
-/*
- 0 == we are in kernel mode. continue.
- 1 == we are not in kernel mode. error message.
- */
-int permissionCheck(void) {
-	if ((USLOSS_PsrGet() & 0x1) < 1) {
-		USLOSS_Console(
-				"Must be in Kernel mode to perform this request. Stopping requested operation\n");
-		return 1;
-	}
-	return 0;
-}
-
-/* -------------------------- Functions ----------------------------------- */
 /* ------------------------------------------------------------------------
  Name - dispatcher
  Purpose - runs the highest priority runnable process
@@ -112,7 +101,7 @@ int permissionCheck(void) {
 
 void dispatcher(void) {
 	while (1) {
-		PCB *p = queuePriorityPop(1);
+		PCB *p = queuePop(&readyQueue);
 		pid = p->pid;
 		if (p->state == READY) {
 			p->state = RUNNING;
@@ -145,6 +134,13 @@ void startup() {
 		procTable[i].cpuTime = 0;
 		procTable[i].killedStatus = 0;
 		procTable[i].pid = i;
+	}
+
+	for(i = 0; i < P1_MAXSEM;i++){
+		semaphoreTable[i].id = i;
+		semaphoreTable[i].inUse = 0;
+		semaphoreTable[i].count = 0;
+		semaphoreTable[i].next = NULL;
 	}
 
 	/* Initialize interrupt handlers */
@@ -196,16 +192,20 @@ void finish() {
  ------------------------------------------------------------------------ */
 int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize,
 		int priority) {
+	interruptsOff();
 	if (permissionCheck()) {
+		interruptsOn();
 		return -1;
 	}
 	if (stacksize < USLOSS_MIN_STACK) {
+		interruptsOn();
 		return -2;
 	}
 	if (priority < 0 || priority > 5) {
 		if (priority == 6 && strcmp(name, "sentinel") == 0) {
 			;
 		} else {
+			interruptsOn();
 			return -3;
 		}
 	}
@@ -230,6 +230,7 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize,
 	}
 
 	if (newPid == -1) {
+		interruptsOn();
 		return -1;
 	}
 	procTable[newPid].startFunc = f;
@@ -241,15 +242,17 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize,
 			stacksize, launch);
 	numProcs++;
 
-	queueInsert(&(procTable[newPid]), 1);
+	queuePriorityInsert(&(procTable[newPid]), &readyQueue);
 	if (startUpDone && (priority < procTable[pid].priority)) {
 		if (procTable[pid].state == RUNNING) {
 			procTable[pid].state = READY;
 		}
-		queueInsert(&(procTable[pid]), 1);
+		queuePriorityInsert(&(procTable[pid]), &readyQueue);
+		interruptsOn();
 		// switching contexts so get new start time from cpu
 		USLOSS_ContextSwitch(&(procTable[pid].context), &dispatcher_context);
 	}
+	interruptsOn();
 	return newPid;
 } /* End of fork */
 
@@ -263,7 +266,7 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize,
  ------------------------------------------------------------------------ */
 void launch(void) {
 	int rc;
-	USLOSS_PsrSet(USLOSS_PsrGet() | USLOSS_PSR_CURRENT_INT);
+	interruptsOn();
 	rc = procTable[pid].startFunc(procTable[pid].startArg);
 	/* quit if we ever come back */
 	P1_Quit(rc);
@@ -335,7 +338,7 @@ int P1_GetState(int pid) {
 			return 1;
 		} else if (procTable[pid].state == KILLED) {
 			return 2;
-		} else if (procTable[pid].state == BLOCKED) {
+		} else if (procTable[pid].blocked) {
 			return 4;
 		} else {
 			return 3;
@@ -369,20 +372,20 @@ void P1_DumpProcesses(void) {
 			bytes += sprintf(string + bytes, "%-20d", i);
 			bytes += sprintf(string + bytes, "%-20d", procTable[i].parentPid);
 			bytes += sprintf(string + bytes, "%-20d", procTable[i].priority);
-			if (procTable[i].state == RUNNING) {
+			if(procTable[i].blocked){
+				bytes += sprintf(string + bytes, "%-20s", "BLOCKED");
+			}
+			else if (procTable[i].state == RUNNING) {
 				bytes += sprintf(string + bytes, "%-20s", "RUNNING");
 			}
-			if (procTable[i].state == READY) {
+			else if (procTable[i].state == READY) {
 				bytes += sprintf(string + bytes, "%-20s", "READY");
 			}
-			if (procTable[i].state == KILLED) {
+			else if (procTable[i].state == KILLED) {
 				bytes += sprintf(string + bytes, "%-20s", "KILLED");
 			}
-			if (procTable[i].state == QUIT) {
+			else if (procTable[i].state == QUIT) {
 				bytes += sprintf(string + bytes, "%-20s", "QUIT");
-			}
-			if (procTable[i].state == BLOCKED) {
-				bytes += sprintf(string + bytes, "%-20s", "BLOCKED");
 			}
 			bytes += sprintf(string + bytes, "%-20d", procTable[i].numChildren);
 			if (i == pid) {
@@ -405,8 +408,7 @@ int P1_Kill(int p) {
 	}
 	printf("%d\n", procTable[p].state);
 	if (p >= 0 && p < P1_MAXPROC) {
-		if (procTable[p].state == READY || procTable[p].state == BLOCKED) {
-			printf("HEre\n");
+		if (procTable[p].state == READY || procTable[p].blocked) {
 			procTable[p].state = KILLED;
 			procTable[p].killedStatus = 0;
 		}
@@ -423,66 +425,175 @@ int P1_ReadTime(void) {
 	return (procTable[pid].cpuTime + (finTime - procTable[pid].startTime));
 }
 
-void queueInsert(PCB *pcb, int ready) {
+/*
+ 0 == we are in kernel mode. continue.
+ 1 == we are not in kernel mode. error message.
+ */
+int permissionCheck(void) {
+	if ((USLOSS_PsrGet() & 0x1) < 1) {
+		USLOSS_Console(
+				"Must be in Kernel mode to perform this request. Stopping requested operation\n");
+		return 1;
+	}
+	return 0;
+}
+
+void interruptsOn(void){
+	USLOSS_PsrSet(USLOSS_PsrGet() | USLOSS_PSR_CURRENT_INT);
+}
+
+void interruptsOff(void){
+	/*Thanks for the drill on this.*/
+	USLOSS_PsrSet(USLOSS_PsrGet() & ~(1 << USLOSS_PSR_CURRENT_INT));
+}
+
+/* Insert into a normal queue*/
+void queueInsert(PCB *pcb, queueNode **head) {
+        queueNode *node = malloc(sizeof(queueNode));
+        node->pcb = pcb;
+        node->next = NULL;
+
+        if(*head == NULL){
+                *head = node;
+                return;
+        }
+
+        queueNode **temp = head;
+        while ((*temp)->next != NULL) {
+                temp = &(*temp)->next;
+        }
+	(*temp)->next = node;
+}
+
+/*Insert into a priority queue*/
+void queuePriorityInsert(PCB *pcb, queueNode **head) {
 	queueNode *node = malloc(sizeof(queueNode));
 	node->pcb = pcb;
 	node->next = NULL;
-	queueNode *temp;
-	if (ready) {
-		if (readyQueue == NULL) {
-			readyQueue = node;
-			return;
-		} else if (readyQueue->pcb->priority > pcb->priority) {
-			node->next = readyQueue;
-			readyQueue = node;
-			return;
-		}
-		temp = readyQueue;
-	} else {
-		if (blockedQueue == NULL) {
-			blockedQueue = node;
-			return;
-		} else if (blockedQueue->pcb->priority > pcb->priority) {
-			node->next = blockedQueue;
-			blockedQueue = node;
-			return;
-		}
-		temp = blockedQueue;
+	
+	if(*head == NULL){
+		*head = node;
+		return;
+	}else if(pcb->priority < (*head)->pcb->priority){
+		node->next = *head;
+		*head = node;
+		return;
 	}
 
-	while (temp->next != NULL && pcb->priority >= temp->next->pcb->priority) {
-		temp = temp->next;
+	queueNode **temp = head;
+	queueNode **prev = NULL;
+	while(*temp != NULL && (*temp)->pcb->priority <= pcb->priority){
+		prev = temp;
+		temp = &(*temp)->next;
 	}
 
-	if (temp->next == NULL) {
-		temp->next = node;
-	} else {
-		node->next = temp->next;
-		temp->next = node;
-	}
+	node->next = (*prev)->next;
+	(*prev)->next = node;
 }
 
 /*Debugging function*/
-void printList() {
-	queueNode *tmp = readyQueue;
+void printList(queueNode *head) {
+	queueNode *tmp = head;
 	while (tmp) {
 		printf("%d\n", tmp->pcb->priority);
 		tmp = tmp->next;
 	}
 }
 
-PCB * queuePriorityPop(int ready) {
+PCB * queuePop(queueNode **head) {
 	PCB *pcb;
-	if (ready) {
-		pcb = readyQueue->pcb;
-		queueNode *tmp = readyQueue;
-		readyQueue = readyQueue->next;
-		free(tmp);
-	} else {
-		pcb = blockedQueue->pcb;
-		queueNode *tmp = blockedQueue;
-		blockedQueue = blockedQueue->next;
-		free(tmp);
-	}
+	queueNode *tmp = *head;
+	*head = (*head)->next;
+	pcb = tmp->pcb;
+	free(tmp);
 	return pcb;
+}
+
+P1_Semaphore P1_SemCreate(unsigned int value){
+	interruptsOff();
+	int i;
+	for(i = 0; i < P1_MAXSEM;i++){
+		if(semaphoreTable[i].inUse == 0){
+			semaphoreTable[i].count = value;
+			semaphoreTable[i].next = NULL;
+			numSemaphores++;
+			interruptsOn();
+			return &semaphoreTable[i];
+		}
+	}
+	interruptsOn();
+	/*Should never get here*/
+	return NULL;
+}
+
+int P1_SemFree(P1_Semaphore sem){
+	interruptsOff();
+	semaphore *s = (semaphore *)sem;
+	if(s->inUse == 0){
+		interruptsOn();
+		return -1;
+	}
+
+	if(s->next != NULL){
+		USLOSS_Console("P1_SemFree called on semaphore with blocked processes\n");
+		USLOSS_Halt(1);
+	}
+	s->inUse = 0;
+	s->next = NULL;
+	s->count = 0;
+	interruptsOn();
+	return 0;
+}
+
+int P1_P(P1_Semaphore sem){
+	semaphore *s = (semaphore *)sem;
+	if(s->inUse == 0){
+		return -1;
+	}
+
+	/*Implementation taken directly from slides.*/
+	while(1){
+		interruptsOff();
+		if(procTable[pid].state == KILLED){
+			interruptsOn();
+			return -2;
+		}
+
+		if(s->count > 0){
+			s->count--;
+			goto done;
+		}
+
+		interruptsOn();
+	}
+	done:interruptsOn();
+	return 0;
+}
+
+void syscallHandler(int type,void *arg){
+        USLOSS_Sysargs *argStruct = (USLOSS_Sysargs *) arg;
+        char string[50];
+        sprintf(string,"System call %d not implemented\n",argStruct->number);
+        USLOSS_Console(string);
+        P1_Quit(1);
+}
+
+void clockIntHandler(int type, void *arg){
+	return;
+}
+
+void countDownIntHandler(int type, void *arg){
+	return;
+}
+
+void terminalIntHandler(int type, void *arg){
+	return;
+}
+
+void diskIntHandler(int type, void *arg){
+	return;
+}
+
+void MMUIntHandler(int type, void *arg){
+	return;
 }
