@@ -192,11 +192,11 @@ void finish() {
  ------------------------------------------------------------------------ */
 int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize,
 		int priority) {
-	interruptsOff();
 	if (permissionCheck()) {
 		interruptsOn();
 		return -1;
 	}
+	interruptsOff();
 	if (stacksize < USLOSS_MIN_STACK) {
 		interruptsOn();
 		return -2;
@@ -283,6 +283,7 @@ void P1_Quit(int status) {
 	if (permissionCheck()) {
 		return;
 	}
+	interruptsOff();
 	procTable[pid].state = UNUSED;
 	procTable[pid].numChildren = 0;
 	procTable[pid].startTime = 0;
@@ -296,6 +297,7 @@ void P1_Quit(int status) {
 		}
 	}
 	numProcs--;
+	interruptsOn();
 	USLOSS_ContextSwitch(NULL, &dispatcher_context);
 }
 
@@ -406,14 +408,17 @@ int P1_Kill(int p) {
 	if (p == pid) {
 		return -2;
 	}
+	interruptsOff();
 	printf("%d\n", procTable[p].state);
 	if (p >= 0 && p < P1_MAXPROC) {
 		if (procTable[p].state == READY || procTable[p].blocked) {
 			procTable[p].state = KILLED;
 			procTable[p].killedStatus = 0;
 		}
+		interruptsOn();
 		return 0;
 	}
+	interruptsOn();
 	return -1;
 }
 
@@ -449,12 +454,14 @@ void interruptsOff(void){
 
 /* Insert into a normal queue*/
 void queueInsert(PCB *pcb, queueNode **head) {
+	interruptsOff();
         queueNode *node = malloc(sizeof(queueNode));
         node->pcb = pcb;
         node->next = NULL;
 
         if(*head == NULL){
                 *head = node;
+		interruptsOn();
                 return;
         }
 
@@ -463,10 +470,12 @@ void queueInsert(PCB *pcb, queueNode **head) {
                 temp = &(*temp)->next;
         }
 	(*temp)->next = node;
+	interruptsOn();
 }
 
 /*Insert into a priority queue*/
 void queuePriorityInsert(PCB *pcb, queueNode **head) {
+	interruptsOff();
 	queueNode *node = malloc(sizeof(queueNode));
 	node->pcb = pcb;
 	node->next = NULL;
@@ -477,6 +486,7 @@ void queuePriorityInsert(PCB *pcb, queueNode **head) {
 	}else if(pcb->priority < (*head)->pcb->priority){
 		node->next = *head;
 		*head = node;
+		interruptsOn();
 		return;
 	}
 
@@ -489,6 +499,7 @@ void queuePriorityInsert(PCB *pcb, queueNode **head) {
 
 	node->next = (*prev)->next;
 	(*prev)->next = node;
+	interruptsOn();
 }
 
 /*Debugging function*/
@@ -501,11 +512,13 @@ void printList(queueNode *head) {
 }
 
 PCB * queuePop(queueNode **head) {
+	interruptsOff();
 	PCB *pcb;
 	queueNode *tmp = *head;
 	*head = (*head)->next;
 	pcb = tmp->pcb;
 	free(tmp);
+	interruptsOn();
 	return pcb;
 }
 
