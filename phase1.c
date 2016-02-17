@@ -17,6 +17,10 @@ typedef enum States {
 } State;
 
 /* -------------------------- Globals ------------------------------------- */
+   
+
+int clockSumTicks = 0;
+int clockIntTicks = 0;
 
 typedef struct PCB {
 	char *name;
@@ -31,20 +35,23 @@ typedef struct PCB {
 	int startTime; /*Time when the Process started running*/
 	int killedStatus; /* status given to process by kill() */
 	int pid;
+	int semId;	// id for the semaphore blocking the PCB
 	int blocked; /*Is this process blocked?*/
 	void* processStack; /*Process stack for context*/
 } PCB;
 
+ 
+
 typedef struct node {
-	PCB *pcb;
-	struct node *next;
+        PCB *pcb;
+        struct node *next;
 } queueNode;
 
 typedef struct semaphore {
-	int count;
-	int id;
-	int inUse;
-	queueNode *next;
+        int count;
+        int id;
+        int inUse;
+        queueNode *next;
 } semaphore;
 
 #define LOWEST_PRIORITY 6
@@ -60,6 +67,7 @@ queueNode *readyQueue = NULL;
 
 /* current process ID */
 int pid = -1;
+
 
 /* number of processes */
 int numProcs = 0;
@@ -106,6 +114,7 @@ void dispatcher(void) {
 		if (p->state == READY) {
 			p->state = RUNNING;
 		}
+		
 		p->startTime = USLOSS_Clock();
 		USLOSS_ContextSwitch(&dispatcher_context, &(p->context));
 		int finTime = USLOSS_Clock();
@@ -248,6 +257,9 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize,
 			procTable[pid].state = READY;
 		}
 		queuePriorityInsert(&(procTable[pid]), &readyQueue);
+
+		procTable[pid].cpuTime = P1_ReadTime();		
+
 		interruptsOn();
 		// switching contexts so get new start time from cpu
 		USLOSS_ContextSwitch(&(procTable[pid].context), &dispatcher_context);
@@ -592,6 +604,22 @@ void syscallHandler(int type,void *arg){
 }
 
 void clockIntHandler(int type, void *arg){
+	clockSumTicks++;
+	clockIntTicks++;
+	if (clockSumTicks == 5) {
+		// V the clock sum
+		clockSumTicks = 0;
+	}
+	if (clockIntTicks == 4){
+                //insert PCB back into priority queue
+		queuePriorityInsert(&(procTable[pid]),&readyQueue);
+                clockIntTicks = 0;
+		// measure the cpu time used for the current pid
+		procTable[pid].cpuTime = P1_ReadTime();
+		// switch back to dispathcer
+                USLOSS_ContextSwitch(&(procTable[pid].context), &dispatcher_context);
+        }
+	
 	return;
 }
 
