@@ -53,8 +53,9 @@ int P2_Startup(void *notused)
             USLOSS_Console("Pass - > Returned: %d, Not enough process space\n", result);
     }
     
-    P1_Kill(48, 1);
- 
+    P1_Kill(48);
+
+    printf("%d\n",P1_GetState(48)); 
     if (P1_GetState(48) == 2) {
        USLOSS_Console("PASS: process 48 marked for death\n");
     }

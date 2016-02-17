@@ -9,14 +9,14 @@ int P3_Startup(void *notused);
 int P2_Startup(void *notused) 
 {
     USLOSS_Console("P2_Started\n");
-    int result = P1_Kill(-1, 1);
+    int result = P1_Kill(-1);
     if (result != -1) {
        USLOSS_Console("Fail 1: should have been an error");
        return 0;
     }
  
    
-    result = P1_Kill(50, 1);
+    result = P1_Kill(50);
     if (result != -1) {
        USLOSS_Console("Fail 2: should have been an error");
        return 0;
@@ -36,7 +36,7 @@ int P2_Startup(void *notused)
     }
  
      
-    P1_Kill(42,1);
+    P1_Kill(42);
     result = P1_GetState(42); 
     if (result != 2) {
        USLOSS_Console("Fail 5: state of process 42 should be marked for death");

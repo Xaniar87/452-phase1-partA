@@ -31,7 +31,7 @@ int P2_Startup(void *notused)
     if (P1_GetState(0) != 1) {
         USLOSS_Console("Fail: state of sentinel should be ready");
     }
-    int result = P1_Kill(P1_GetPID(), 1);
+    int result = P1_Kill(P1_GetPID());
  
     if (result == -2) {
            USLOSS_Console("PASS\n");
