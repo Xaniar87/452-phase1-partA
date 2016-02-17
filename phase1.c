@@ -421,7 +421,6 @@ int P1_Kill(int p) {
 		return -2;
 	}
 	interruptsOff();
-	printf("%d\n", procTable[p].state);
 	if (p >= 0 && p < P1_MAXPROC) {
 		if (procTable[p].state == READY || procTable[p].blocked) {
 			procTable[p].state = KILLED;
@@ -518,7 +517,7 @@ void queuePriorityInsert(PCB *pcb, queueNode **head) {
 void printList(queueNode *head) {
 	queueNode *tmp = head;
 	while (tmp) {
-		printf("%d\n", tmp->pcb->priority);
+		printf("%s\n", tmp->pcb->name);
 		tmp = tmp->next;
 	}
 }
@@ -606,6 +605,7 @@ void syscallHandler(int type,void *arg){
 void clockIntHandler(int type, void *arg){
 	clockSumTicks++;
 	clockIntTicks++;
+	printf("INSIDE clockIntHandler %d %d\n",clockSumTicks,clockIntTicks);
 	if (clockSumTicks == 5) {
 		// V the clock sum
 		clockSumTicks = 0;
