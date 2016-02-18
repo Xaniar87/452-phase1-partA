@@ -17,7 +17,6 @@ typedef enum States {
 } State;
 
 /* -------------------------- Globals ------------------------------------- */
-   
 
 int clockSumTicks = 0;
 int clockIntTicks = 0;
@@ -40,18 +39,16 @@ typedef struct PCB {
 	void* processStack; /*Process stack for context*/
 } PCB;
 
- 
-
 typedef struct node {
-        PCB *pcb;
-        struct node *next;
+	PCB *pcb;
+	struct node *next;
 } queueNode;
 
 typedef struct semaphore {
-        int count;
-        int id;
-        int inUse;
-        queueNode *next;
+	int count;
+	int id;
+	int inUse;
+	queueNode *queue;
 } semaphore;
 
 #define LOWEST_PRIORITY 6
@@ -68,7 +65,6 @@ queueNode *readyQueue = NULL;
 /* current process ID */
 int pid = -1;
 
-
 /* number of processes */
 int numProcs = 0;
 int numSemaphores = 0;
@@ -84,7 +80,7 @@ void interruptsOff(void);
 void interruptsOn(void);
 
 /* Interrupt Handlers */
-void syscallHandler(int type,void *arg);
+void syscallHandler(int type, void *arg);
 void clockIntHandler(int type, void *arg);
 void countDownIntHandler(int type, void *arg);
 void terminalIntHandler(int type, void *arg);
@@ -98,6 +94,8 @@ void queueInsert(PCB *pcb, queueNode **head);
 
 /*Misc*/
 int permissionCheck(void);
+int checkInvalidSemaphore(P1_Semaphore sem);
+void prepareDispatcherSwap(int readyInsert);
 
 /* ------------------------------------------------------------------------
  Name - dispatcher
@@ -114,7 +112,7 @@ void dispatcher(void) {
 		if (p->state == READY) {
 			p->state = RUNNING;
 		}
-		
+		clockIntTicks = 0;
 		p->startTime = USLOSS_Clock();
 		USLOSS_ContextSwitch(&dispatcher_context, &(p->context));
 		int finTime = USLOSS_Clock();
@@ -145,11 +143,11 @@ void startup() {
 		procTable[i].pid = i;
 	}
 
-	for(i = 0; i < P1_MAXSEM;i++){
+	for (i = 0; i < P1_MAXSEM; i++) {
 		semaphoreTable[i].id = i;
 		semaphoreTable[i].inUse = 0;
 		semaphoreTable[i].count = 0;
-		semaphoreTable[i].next = NULL;
+		semaphoreTable[i].queue = NULL;
 	}
 
 	/* Initialize interrupt handlers */
@@ -159,7 +157,6 @@ void startup() {
 	USLOSS_IntVec[USLOSS_TERM_INT] = terminalIntHandler;
 	USLOSS_IntVec[USLOSS_DISK_INT] = diskIntHandler;
 	USLOSS_IntVec[USLOSS_MMU_INT] = MMUIntHandler;
-
 
 	P1_Fork("sentinel", sentinel, NULL, USLOSS_MIN_STACK, 6);
 
@@ -253,16 +250,7 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize,
 
 	queuePriorityInsert(&(procTable[newPid]), &readyQueue);
 	if (startUpDone && (priority < procTable[pid].priority)) {
-		if (procTable[pid].state == RUNNING) {
-			procTable[pid].state = READY;
-		}
-		queuePriorityInsert(&(procTable[pid]), &readyQueue);
-
-		procTable[pid].cpuTime = P1_ReadTime();		
-
-		interruptsOn();
-		// switching contexts so get new start time from cpu
-		USLOSS_ContextSwitch(&(procTable[pid].context), &dispatcher_context);
+		prepareDispatcherSwap(1);
 	}
 	interruptsOn();
 	return newPid;
@@ -386,19 +374,15 @@ void P1_DumpProcesses(void) {
 			bytes += sprintf(string + bytes, "%-20d", i);
 			bytes += sprintf(string + bytes, "%-20d", procTable[i].parentPid);
 			bytes += sprintf(string + bytes, "%-20d", procTable[i].priority);
-			if(procTable[i].blocked){
+			if (procTable[i].blocked) {
 				bytes += sprintf(string + bytes, "%-20s", "BLOCKED");
-			}
-			else if (procTable[i].state == RUNNING) {
+			} else if (procTable[i].state == RUNNING) {
 				bytes += sprintf(string + bytes, "%-20s", "RUNNING");
-			}
-			else if (procTable[i].state == READY) {
+			} else if (procTable[i].state == READY) {
 				bytes += sprintf(string + bytes, "%-20s", "READY");
-			}
-			else if (procTable[i].state == KILLED) {
+			} else if (procTable[i].state == KILLED) {
 				bytes += sprintf(string + bytes, "%-20s", "KILLED");
-			}
-			else if (procTable[i].state == QUIT) {
+			} else if (procTable[i].state == QUIT) {
 				bytes += sprintf(string + bytes, "%-20s", "QUIT");
 			}
 			bytes += sprintf(string + bytes, "%-20d", procTable[i].numChildren);
@@ -454,32 +438,44 @@ int permissionCheck(void) {
 	return 0;
 }
 
-void interruptsOn(void){
+void interruptsOn(void) {
 	USLOSS_PsrSet(USLOSS_PsrGet() | USLOSS_PSR_CURRENT_INT);
 }
 
-void interruptsOff(void){
+void interruptsOff(void) {
 	/*Thanks for the drill on this.*/
 	USLOSS_PsrSet(USLOSS_PsrGet() & ~(1 << USLOSS_PSR_CURRENT_INT));
+}
+
+void prepareDispatcherSwap(int insertReady){
+	if (procTable[pid].state == RUNNING) {
+		procTable[pid].state = READY;
+	}
+	procTable[pid].cpuTime = P1_ReadTime();
+	if(insertReady){
+		queuePriorityInsert(&(procTable[pid]), &readyQueue);
+	}
+	interruptsOn();
+	USLOSS_ContextSwitch(&(procTable[pid].context), &dispatcher_context);
 }
 
 /* Insert into a normal queue*/
 void queueInsert(PCB *pcb, queueNode **head) {
 	interruptsOff();
-        queueNode *node = malloc(sizeof(queueNode));
-        node->pcb = pcb;
-        node->next = NULL;
+	queueNode *node = malloc(sizeof(queueNode));
+	node->pcb = pcb;
+	node->next = NULL;
 
-        if(*head == NULL){
-                *head = node;
+	if (*head == NULL) {
+		*head = node;
 		interruptsOn();
-                return;
-        }
+		return;
+	}
 
-        queueNode **temp = head;
-        while ((*temp)->next != NULL) {
-                temp = &(*temp)->next;
-        }
+	queueNode **temp = head;
+	while ((*temp)->next != NULL) {
+		temp = &(*temp)->next;
+	}
 	(*temp)->next = node;
 	interruptsOn();
 }
@@ -490,11 +486,11 @@ void queuePriorityInsert(PCB *pcb, queueNode **head) {
 	queueNode *node = malloc(sizeof(queueNode));
 	node->pcb = pcb;
 	node->next = NULL;
-	
-	if(*head == NULL){
+
+	if (*head == NULL) {
 		*head = node;
 		return;
-	}else if(pcb->priority < (*head)->pcb->priority){
+	} else if (pcb->priority < (*head)->pcb->priority) {
 		node->next = *head;
 		*head = node;
 		interruptsOn();
@@ -503,7 +499,7 @@ void queuePriorityInsert(PCB *pcb, queueNode **head) {
 
 	queueNode **temp = head;
 	queueNode **prev = NULL;
-	while(*temp != NULL && (*temp)->pcb->priority <= pcb->priority){
+	while (*temp != NULL && (*temp)->pcb->priority <= pcb->priority) {
 		prev = temp;
 		temp = &(*temp)->next;
 	}
@@ -533,13 +529,14 @@ PCB * queuePop(queueNode **head) {
 	return pcb;
 }
 
-P1_Semaphore P1_SemCreate(unsigned int value){
+P1_Semaphore P1_SemCreate(unsigned int value) {
 	interruptsOff();
 	int i;
-	for(i = 0; i < P1_MAXSEM;i++){
-		if(semaphoreTable[i].inUse == 0){
+	for (i = 0; i < P1_MAXSEM; i++) {
+		if (semaphoreTable[i].inUse == 0) {
 			semaphoreTable[i].count = value;
-			semaphoreTable[i].next = NULL;
+			semaphoreTable[i].queue = NULL;
+			semaphoreTable[i].inUse = 1;
 			numSemaphores++;
 			interruptsOn();
 			return &semaphoreTable[i];
@@ -550,91 +547,132 @@ P1_Semaphore P1_SemCreate(unsigned int value){
 	return NULL;
 }
 
-int P1_SemFree(P1_Semaphore sem){
+int P1_SemFree(P1_Semaphore sem) {
 	interruptsOff();
-	semaphore *s = (semaphore *)sem;
-	if(s->inUse == 0){
+	if (checkInvalidSemaphore(sem)) {
+		return -1;
+	}
+	semaphore *s = (semaphore *) sem;
+	if (s->inUse == 0) {
 		interruptsOn();
 		return -1;
 	}
 
-	if(s->next != NULL){
-		USLOSS_Console("P1_SemFree called on semaphore with blocked processes\n");
+	if (s->queue != NULL) {
+		USLOSS_Console(
+				"P1_SemFree called on semaphore with blocked processes\n");
 		USLOSS_Halt(1);
 	}
 	s->inUse = 0;
-	s->next = NULL;
+	s->queue = NULL;
 	s->count = 0;
+	numSemaphores--;
 	interruptsOn();
 	return 0;
 }
 
-int P1_P(P1_Semaphore sem){
-	semaphore *s = (semaphore *)sem;
-	if(s->inUse == 0){
+int P1_P(P1_Semaphore sem) {
+	if (checkInvalidSemaphore(sem)) {
 		return -1;
 	}
 
-	/*Implementation taken directly from slides.*/
-	while(1){
+	semaphore *s = (semaphore *) sem;
+	if (s->inUse == 0) {
+		return -1;
+	}
+
+	while (1) {
 		interruptsOff();
-		if(procTable[pid].state == KILLED){
+		if (procTable[pid].state == KILLED) {
 			interruptsOn();
 			return -2;
 		}
 
 		if(s->count > 0){
 			s->count--;
-			goto done;
+			break;
 		}
 
+		queueInsert(&procTable[pid],&(s->queue));
+		procTable[pid].blocked = 1;
 		interruptsOn();
+		prepareDispatcherSwap(0);
+		
 	}
-	done:interruptsOn();
+	interruptsOn();
 	return 0;
 }
 
-void syscallHandler(int type,void *arg){
-        USLOSS_Sysargs *argStruct = (USLOSS_Sysargs *) arg;
-        char string[50];
-        sprintf(string,"System call %d not implemented\n",argStruct->number);
-        USLOSS_Console(string);
-        P1_Quit(1);
+int P1_V(P1_Semaphore sem){
+	if (checkInvalidSemaphore(sem)) {
+		return -1;
+	}
+
+	semaphore *s = (semaphore *) sem;
+	if (s->inUse == 0) {
+		return -1;
+	}
+
+	interruptsOff();
+
+	s->count++;
+	if(s->queue != NULL){
+		PCB *p = queuePop(&(s->queue));
+		queuePriorityInsert(p,&readyQueue);
+		interruptsOn();
+		prepareDispatcherSwap(1);
+	}
+	else{
+		interruptsOn();
+	}
+	return 0;
 }
 
-void clockIntHandler(int type, void *arg){
+/*Checks address of sem against ALL available user semaphores. Returns 1 if invalid semaphore. Returns 0 if valid.*/
+int checkInvalidSemaphore(P1_Semaphore sem) {
+	int i;
+	for (i = 0; i < P1_MAXSEM; i++) {
+		if (&(semaphoreTable[i]) == sem) {
+			return 0;
+		}
+	}
+	return 1;
+}
+
+void syscallHandler(int type, void *arg) {
+	USLOSS_Sysargs *argStruct = (USLOSS_Sysargs *) arg;
+	char string[50];
+	sprintf(string, "System call %d not implemented\n", argStruct->number);
+	USLOSS_Console(string);
+	P1_Quit(1);
+}
+
+void clockIntHandler(int type, void *arg) {
 	clockSumTicks++;
 	clockIntTicks++;
-	printf("INSIDE clockIntHandler %d %d\n",clockSumTicks,clockIntTicks);
 	if (clockSumTicks == 5) {
 		// V the clock sum
 		clockSumTicks = 0;
 	}
-	if (clockIntTicks == 4){
-                //insert PCB back into priority queue
-		queuePriorityInsert(&(procTable[pid]),&readyQueue);
-                clockIntTicks = 0;
-		// measure the cpu time used for the current pid
-		procTable[pid].cpuTime = P1_ReadTime();
-		// switch back to dispathcer
-                USLOSS_ContextSwitch(&(procTable[pid].context), &dispatcher_context);
-        }
-	
+	if (clockIntTicks == 4) {
+		prepareDispatcherSwap(1);
+	}
+
 	return;
 }
 
-void countDownIntHandler(int type, void *arg){
+void countDownIntHandler(int type, void *arg) {
 	return;
 }
 
-void terminalIntHandler(int type, void *arg){
+void terminalIntHandler(int type, void *arg) {
 	return;
 }
 
-void diskIntHandler(int type, void *arg){
+void diskIntHandler(int type, void *arg) {
 	return;
 }
 
-void MMUIntHandler(int type, void *arg){
+void MMUIntHandler(int type, void *arg) {
 	return;
 }
