@@ -21,6 +21,9 @@ typedef enum States {
 int clockSumTicks = 0;
 int clockIntTicks = 0;
 
+struct semaphore;
+struct node;
+
 typedef struct PCB {
 	char *name;
 	USLOSS_Context context;
@@ -34,7 +37,8 @@ typedef struct PCB {
 	int startTime; /*Time when the Process started running*/
 	int killedStatus; /* status given to process by kill() */
 	int pid;
-	int semId;	// id for the semaphore blocking the PCB
+	struct semaphore *sem;	// id for the semaphore children operate on
+	struct node *deadChildren;
 	int blocked; /*Is this process blocked?*/
 	void* processStack; /*Process stack for context*/
 } PCB;
@@ -67,7 +71,6 @@ int pid = -1;
 
 /* number of processes */
 int numProcs = 0;
-int numSemaphores = 0;
 USLOSS_Context dispatcher_context;
 
 /* Flag for Fork - Determines if we should invoke dispatcher*/
@@ -107,6 +110,7 @@ void prepareDispatcherSwap(int readyInsert);
 
 void dispatcher(void) {
 	while (1) {
+		interruptsOff();
 		PCB *p = queuePop(&readyQueue);
 		pid = p->pid;
 		if (p->state == READY) {
@@ -114,6 +118,7 @@ void dispatcher(void) {
 		}
 		clockIntTicks = 0;
 		p->startTime = USLOSS_Clock();
+		interruptsOn();
 		USLOSS_ContextSwitch(&dispatcher_context, &(p->context));
 		int finTime = USLOSS_Clock();
 		p->cpuTime = (p->cpuTime + (finTime - p->startTime));
@@ -130,9 +135,15 @@ void dispatcher(void) {
  ----------------------------------------------------------------------- */
 void startup() {
 
-	/* initialize the process table here
-	 loop through array and initialize base values for PCB*/
 	int i;
+
+	for (i = 0; i < P1_MAXSEM; i++) {
+		semaphoreTable[i].id = i;
+		semaphoreTable[i].inUse = 0;
+		semaphoreTable[i].count = 0;
+		semaphoreTable[i].queue = NULL;
+	}
+
 	for (i = 0; i < P1_MAXPROC; i++) {
 		procTable[i].state = UNUSED;
 		procTable[i].cpuTime = 0;
@@ -141,13 +152,9 @@ void startup() {
 		procTable[i].cpuTime = 0;
 		procTable[i].killedStatus = 0;
 		procTable[i].pid = i;
-	}
-
-	for (i = 0; i < P1_MAXSEM; i++) {
-		semaphoreTable[i].id = i;
-		semaphoreTable[i].inUse = 0;
-		semaphoreTable[i].count = 0;
-		semaphoreTable[i].queue = NULL;
+		procTable[i].deadChildren = NULL;
+		procTable[i].sem = (semaphore *) P1_SemCreate(0);
+		//printf("%d\n",procTable[i].sem->inUse);
 	}
 
 	/* Initialize interrupt handlers */
@@ -284,23 +291,61 @@ void P1_Quit(int status) {
 		return;
 	}
 	interruptsOff();
-	procTable[pid].state = UNUSED;
+	procTable[pid].state = QUIT;
 	procTable[pid].numChildren = 0;
 	procTable[pid].startTime = 0;
 	procTable[pid].cpuTime = 0;
-	procTable[pid].parentPid = 0;
+	procTable[pid].killedStatus = status;
 	int i;
 	// let other processes know that they are orphans by setting parentPID = -1
 	for (i = 0; i < P1_MAXPROC; i++) {
 		if (procTable[i].parentPid == pid) {
 			procTable[i].parentPid = -1;
+			//Allow processes that have quit but not joined() yet to be overwritten
+			if(procTable[i].state == QUIT){
+				procTable[pid].state = UNUSED;
+				procTable[pid].killedStatus = -1;
+				procTable[pid].parentPid = -1;
+			}
 		}
 	}
+
+	/*Orphan - Just allow for overwrite*/
+	if(procTable[pid].parentPid == -1){
+		procTable[pid].state = UNUSED;
+		procTable[pid].killedStatus = -1;
+		procTable[pid].parentPid = -1;
+	}else{
+		/*Need to let parent know that a child has quit*/
+		queueInsert(&(procTable[pid]),&(procTable[procTable[pid].parentPid].deadChildren));
+		P1_V(procTable[procTable[pid].parentPid].sem);
+	}
+
 	numProcs--;
 	interruptsOn();
 	USLOSS_ContextSwitch(NULL, &dispatcher_context);
 }
 
+int P1_Join(int *status) {
+	if (permissionCheck()) {
+		return -2;
+	}
+	interruptsOff();
+	if(procTable[pid].numChildren <= 0){
+		interruptsOn();
+		return -1;
+	}
+
+	P1_P(procTable[pid].sem);
+	PCB *dead = queuePop(&(procTable[pid].deadChildren));
+	*status = dead->killedStatus;
+	int deadPid = dead->pid;
+	procTable[deadPid].state = UNUSED;
+	procTable[deadPid].killedStatus = -1;
+	procTable[deadPid].parentPid = -1;
+	interruptsOn();
+	return deadPid;
+}
 /* ------------------------------------------------------------------------
  Name - sentinel
  Purpose - The purpose of the sentinel routine is two-fold.  One
@@ -425,6 +470,13 @@ int P1_ReadTime(void) {
 	return (procTable[pid].cpuTime + (finTime - procTable[pid].startTime));
 }
 
+int P1_WaitDevice(int type, int unit, int *status) {
+	if (permissionCheck()) {
+		return -4;
+	}
+	return 0;
+}
+
 /*
  0 == we are in kernel mode. continue.
  1 == we are not in kernel mode. error message.
@@ -447,12 +499,12 @@ void interruptsOff(void) {
 	USLOSS_PsrSet(USLOSS_PsrGet() & ~(1 << USLOSS_PSR_CURRENT_INT));
 }
 
-void prepareDispatcherSwap(int insertReady){
+void prepareDispatcherSwap(int insertReady) {
 	if (procTable[pid].state == RUNNING) {
 		procTable[pid].state = READY;
 	}
 	procTable[pid].cpuTime = P1_ReadTime();
-	if(insertReady){
+	if (insertReady) {
 		queuePriorityInsert(&(procTable[pid]), &readyQueue);
 	}
 	interruptsOn();
@@ -530,6 +582,9 @@ PCB * queuePop(queueNode **head) {
 }
 
 P1_Semaphore P1_SemCreate(unsigned int value) {
+	if (permissionCheck()) {
+		return NULL;
+	}
 	interruptsOff();
 	int i;
 	for (i = 0; i < P1_MAXSEM; i++) {
@@ -537,17 +592,20 @@ P1_Semaphore P1_SemCreate(unsigned int value) {
 			semaphoreTable[i].count = value;
 			semaphoreTable[i].queue = NULL;
 			semaphoreTable[i].inUse = 1;
-			numSemaphores++;
 			interruptsOn();
 			return &semaphoreTable[i];
 		}
 	}
 	interruptsOn();
 	/*Should never get here*/
+	printf("Here\n");
 	return NULL;
 }
 
 int P1_SemFree(P1_Semaphore sem) {
+	if (permissionCheck()) {
+		return -2;
+	}
 	interruptsOff();
 	if (checkInvalidSemaphore(sem)) {
 		return -1;
@@ -566,14 +624,17 @@ int P1_SemFree(P1_Semaphore sem) {
 	s->inUse = 0;
 	s->queue = NULL;
 	s->count = 0;
-	numSemaphores--;
 	interruptsOn();
 	return 0;
 }
 
 int P1_P(P1_Semaphore sem) {
+	if (permissionCheck()) {
+		return -2;
+	}
+
 	if (checkInvalidSemaphore(sem)) {
-		return -1;
+	//	return -1;
 	}
 
 	semaphore *s = (semaphore *) sem;
@@ -587,23 +648,24 @@ int P1_P(P1_Semaphore sem) {
 			interruptsOn();
 			return -2;
 		}
-
-		if(s->count > 0){
+		if (s->count > 0) {
 			s->count--;
 			break;
 		}
 
-		queueInsert(&procTable[pid],&(s->queue));
+		queueInsert(&procTable[pid], &(s->queue));
 		procTable[pid].blocked = 1;
 		interruptsOn();
 		prepareDispatcherSwap(0);
-		
 	}
 	interruptsOn();
 	return 0;
 }
 
-int P1_V(P1_Semaphore sem){
+int P1_V(P1_Semaphore sem) {
+	if (permissionCheck()) {
+		return -2;
+	}
 	if (checkInvalidSemaphore(sem)) {
 		return -1;
 	}
@@ -616,13 +678,12 @@ int P1_V(P1_Semaphore sem){
 	interruptsOff();
 
 	s->count++;
-	if(s->queue != NULL){
+	if (s->queue != NULL) {
 		PCB *p = queuePop(&(s->queue));
-		queuePriorityInsert(p,&readyQueue);
+		queuePriorityInsert(p, &readyQueue);
 		interruptsOn();
 		prepareDispatcherSwap(1);
-	}
-	else{
+	} else {
 		interruptsOn();
 	}
 	return 0;
@@ -655,6 +716,7 @@ void clockIntHandler(int type, void *arg) {
 		clockSumTicks = 0;
 	}
 	if (clockIntTicks == 4) {
+		clockIntTicks = 0;
 		prepareDispatcherSwap(1);
 	}
 
