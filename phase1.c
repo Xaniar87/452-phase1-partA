@@ -38,7 +38,8 @@ typedef struct PCB {
 	int killedStatus; /* status given to process by kill() */
 	int pid;
 	struct semaphore *sem;	// id for the semaphore children operate on
-	struct node *deadChildren;
+	struct semaphore *blockedSem; /*Semaphore that this process is blocked on*/
+	struct node *deadChildren; /*List of children that have quit without being joined.*/
 	int blocked; /*Is this process blocked?*/
 	void* processStack; /*Process stack for context*/
 } PCB;
@@ -153,8 +154,7 @@ void startup() {
 		procTable[i].killedStatus = 0;
 		procTable[i].pid = i;
 		procTable[i].deadChildren = NULL;
-		procTable[i].sem = (semaphore *) P1_SemCreate(0);
-		//printf("%d\n",procTable[i].sem->inUse);
+		procTable[i].sem = NULL;
 	}
 
 	/* Initialize interrupt handlers */
@@ -234,10 +234,14 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize,
 			procTable[i].priority = priority;
 			// increment the current process's children count for it
 			procTable[pid].numChildren = procTable[pid].numChildren + 1;
-			if (procTable[pid].processStack != NULL) {
+			if (procTable[i].processStack != NULL) {
 				free(procTable[i].processStack);
 				procTable[i].processStack = NULL;
 			}
+			if(procTable[i].sem != NULL){
+				P1_SemFree(procTable[i].sem);
+			}
+			procTable[i].sem = (semaphore *) P1_SemCreate(0);
 			break;
 		}
 	}
@@ -319,8 +323,13 @@ void P1_Quit(int status) {
 		/*Need to let parent know that a child has quit*/
 		queueInsert(&(procTable[pid]),&(procTable[procTable[pid].parentPid].deadChildren));
 		P1_V(procTable[procTable[pid].parentPid].sem);
+		procTable[procTable[pid].parentPid].numChildren--;
 	}
+	/*Clear dead queue for next process using this PCB.*/
+	while(procTable[pid].deadChildren != NULL){
+		queuePop(&(procTable[pid].deadChildren));
 
+	}
 	numProcs--;
 	interruptsOn();
 	USLOSS_ContextSwitch(NULL, &dispatcher_context);
@@ -379,14 +388,15 @@ int P1_GetState(int pid) {
 		return -1;
 	}
 	if (pid >= 0 && pid < P1_MAXPROC) {
-		if (procTable[pid].state == RUNNING) {
+		if(procTable[pid].blocked){
+			return 4;
+		}
+		else if (procTable[pid].state == RUNNING) {
 			return 0;
 		} else if (procTable[pid].state == READY) {
 			return 1;
 		} else if (procTable[pid].state == KILLED) {
 			return 2;
-		} else if (procTable[pid].blocked) {
-			return 4;
 		} else {
 			return 3;
 		}
@@ -622,7 +632,6 @@ int P1_SemFree(P1_Semaphore sem) {
 		USLOSS_Halt(1);
 	}
 	s->inUse = 0;
-	s->queue = NULL;
 	s->count = 0;
 	interruptsOn();
 	return 0;
@@ -634,7 +643,7 @@ int P1_P(P1_Semaphore sem) {
 	}
 
 	if (checkInvalidSemaphore(sem)) {
-	//	return -1;
+		return -1;
 	}
 
 	semaphore *s = (semaphore *) sem;
@@ -655,9 +664,12 @@ int P1_P(P1_Semaphore sem) {
 
 		queueInsert(&procTable[pid], &(s->queue));
 		procTable[pid].blocked = 1;
+		procTable[pid].blockedSem = sem;
 		interruptsOn();
 		prepareDispatcherSwap(0);
 	}
+	procTable[pid].blocked = 0;
+	procTable[pid].blockedSem = NULL;
 	interruptsOn();
 	return 0;
 }
