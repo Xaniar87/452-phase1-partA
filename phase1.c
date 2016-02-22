@@ -65,6 +65,16 @@ PCB procTable[P1_MAXPROC];
 /*Array of semaphores*/
 semaphore semaphoreTable[P1_MAXSEM];
 
+/*Device semaphores*/
+semaphore *clockDevSemaphore;
+int clockDevStatus = 0;
+semaphore *alarmDevSemaphore;
+int alarmDevStatus = 0;
+semaphore *terminalDevSemaphores[USLOSS_TERM_UNITS] = { NULL };
+int terminalDevStatus[USLOSS_TERM_UNITS] = { 0 };
+semaphore *diskDevSemaphores[USLOSS_DISK_UNITS] = { NULL };
+int diskDevStatus[USLOSS_DISK_UNITS] = { 0 };
+
 queueNode *readyQueue = NULL;
 
 /* current process ID */
@@ -99,6 +109,7 @@ void queueInsert(PCB *pcb, queueNode **head);
 /*Misc*/
 int permissionCheck(void);
 int checkInvalidSemaphore(P1_Semaphore sem);
+int checkDeviceSemaphore(P1_Semaphore sem);
 void prepareDispatcherSwap(int readyInsert);
 
 /* ------------------------------------------------------------------------
@@ -138,6 +149,7 @@ void startup() {
 
 	int i;
 
+	/*Initialize semaphores*/
 	for (i = 0; i < P1_MAXSEM; i++) {
 		semaphoreTable[i].id = i;
 		semaphoreTable[i].inUse = 0;
@@ -145,6 +157,7 @@ void startup() {
 		semaphoreTable[i].queue = NULL;
 	}
 
+	/*Initialize process table*/
 	for (i = 0; i < P1_MAXPROC; i++) {
 		procTable[i].state = UNUSED;
 		procTable[i].cpuTime = 0;
@@ -155,6 +168,17 @@ void startup() {
 		procTable[i].pid = i;
 		procTable[i].deadChildren = NULL;
 		procTable[i].sem = NULL;
+	}
+
+	/*Initialize device semaphores*/
+
+	clockDevSemaphore = P1_SemCreate(0);
+	alarmDevSemaphore = P1_SemCreate(0);
+	for(i = 0; i < USLOSS_TERM_UNITS;i++){
+		terminalDevSemaphores[i] = P1_SemCreate(0);
+	}
+	for(i = 0; i < USLOSS_DISK_UNITS;i++){
+		diskDevSemaphores[i] = P1_SemCreate(0);
 	}
 
 	/* Initialize interrupt handlers */
@@ -233,7 +257,7 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize,
 			procTable[i].parentPid = pid;
 			procTable[i].priority = priority;
 			// increment the current process's children count for it
-			procTable[pid].numChildren = procTable[pid].numChildren + 1;
+			procTable[pid].numChildren++;
 			if (procTable[i].processStack != NULL) {
 				free(procTable[i].processStack);
 				procTable[i].processStack = NULL;
@@ -307,9 +331,9 @@ void P1_Quit(int status) {
 			procTable[i].parentPid = -1;
 			//Allow processes that have quit but not joined() yet to be overwritten
 			if(procTable[i].state == QUIT){
-				procTable[pid].state = UNUSED;
-				procTable[pid].killedStatus = -1;
-				procTable[pid].parentPid = -1;
+				procTable[i].state = UNUSED;
+				procTable[i].killedStatus = -1;
+				procTable[i].parentPid = -1;
 			}
 		}
 	}
@@ -367,8 +391,20 @@ int P1_Join(int *status) {
  and halt.
  ----------------------------------------------------------------------- */
 int sentinel(void *notused) {
+	int i;
+	int deadLock = 1;
 	while (numProcs > 1) {
 		/* Check for deadlock here */
+		for(i = 0; i < P1_MAXPROC;i++){
+			if(procTable[i].blocked && checkDeviceSemaphore(procTable[i].blockedSem)){
+				deadLock = 0;
+				break;
+			}
+		}
+		if(deadLock){
+			USLOSS_Console("Dead lock detected. Stopping.\n");
+			USLOSS_Halt(1);
+		}
 		USLOSS_WaitInt();
 	}
 	USLOSS_Halt(0);
@@ -406,9 +442,9 @@ int P1_GetState(int pid) {
 }
 
 /*
- print process info to console for debuggin purposes
+ print process info to console for debugging purposes
  for each PCB in process table, print its PID, parents PID,
- priority,process state,# of chilren,CPU time consumed,and name
+ priority,process state,# of children,CPU time consumed,and name
  */
 
 void P1_DumpProcesses(void) {
@@ -484,6 +520,57 @@ int P1_WaitDevice(int type, int unit, int *status) {
 	if (permissionCheck()) {
 		return -4;
 	}
+
+	interruptsOff();
+
+	/*Cannot wait on a device if this process is killed.*/
+	if(P1_GetState(pid) == 2){
+		interruptsOn();
+		return -3;
+	}
+
+	if(unit < 0){
+		interruptsOn();
+		return -1;
+	}
+
+	if(type == USLOSS_CLOCK_DEV){
+		if(unit == 0){
+			P1_P(clockDevSemaphore);
+			*status = clockDevStatus;
+		}else{
+			interruptsOn();
+			return -1;
+		}
+	}else if(type == USLOSS_ALARM_DEV){
+		if(unit == 0){
+			P1_P(alarmDevSemaphore);
+			*status = alarmDevStatus;
+		}else{
+			interruptsOn();
+			return -1;
+		}
+	}else if(type == USLOSS_DISK_DEV){
+		if(unit >= 0 && unit < USLOSS_DISK_UNITS){
+			P1_P(diskDevSemaphores[unit]);
+			*status = diskDevStatus[unit];
+		}else{
+			interruptsOn();
+			return -1;
+		}
+	}else if(type == USLOSS_TERM_DEV){
+		if(unit >= 0 && unit < USLOSS_TERM_UNITS){
+			P1_P(terminalDevSemaphores[unit]);
+			*status = terminalDevStatus[unit];
+		}else{
+			interruptsOn();
+			return -1;
+		}
+	}else{
+		interruptsOn();
+		return -2;
+	}
+	interruptsOn();
 	return 0;
 }
 
@@ -519,6 +606,32 @@ void prepareDispatcherSwap(int insertReady) {
 	}
 	interruptsOn();
 	USLOSS_ContextSwitch(&(procTable[pid].context), &dispatcher_context);
+}
+
+/*Check if sem is a device semaphore
+ * returns 0 for not a device semaphore
+ * return 1 if is a device semaphore
+ * */
+int checkDeviceSemaphore(P1_Semaphore sem){
+	if(sem == clockDevSemaphore){
+		return 1;
+	}
+	if(sem == alarmDevSemaphore){
+		return 1;
+	}
+	int i;
+	for(i = 0; i < USLOSS_TERM_UNITS;i++){
+		if(terminalDevSemaphores[i] == sem){
+			return 1;
+		}
+	}
+
+	for(i = 0; i < USLOSS_DISK_UNITS;i++){
+		if(diskDevSemaphores[i] == sem){
+			return 1;
+		}
+	}
+	return 0;
 }
 
 /* Insert into a normal queue*/
@@ -603,12 +716,12 @@ P1_Semaphore P1_SemCreate(unsigned int value) {
 			semaphoreTable[i].queue = NULL;
 			semaphoreTable[i].inUse = 1;
 			interruptsOn();
-			return &semaphoreTable[i];
+			return &(semaphoreTable[i]);
 		}
+		
 	}
 	interruptsOn();
 	/*Should never get here*/
-	printf("Here\n");
 	return NULL;
 }
 
@@ -724,7 +837,9 @@ void clockIntHandler(int type, void *arg) {
 	clockSumTicks++;
 	clockIntTicks++;
 	if (clockSumTicks == 5) {
-		// V the clock sum
+		USLOSS_Console("Got 5!\n");
+		USLOSS_DeviceInput(USLOSS_CLOCK_DEV,0,&clockDevStatus);
+		P1_V(clockDevSemaphore);
 		clockSumTicks = 0;
 	}
 	if (clockIntTicks == 4) {
@@ -736,15 +851,20 @@ void clockIntHandler(int type, void *arg) {
 }
 
 void countDownIntHandler(int type, void *arg) {
-	return;
+	USLOSS_DeviceInput(USLOSS_ALARM_DEV,0,&alarmDevStatus);
+	P1_V(alarmDevSemaphore);
 }
 
 void terminalIntHandler(int type, void *arg) {
-	return;
+	int* unit = (int *) arg;
+	USLOSS_DeviceInput(USLOSS_TERM_DEV,*unit,&(terminalDevStatus[*unit]));
+	P1_V(terminalDevSemaphores[*unit]);
 }
 
 void diskIntHandler(int type, void *arg) {
-	return;
+	int* unit = (int *) arg;
+	USLOSS_DeviceInput(USLOSS_DISK_DEV,*unit,&(diskDevStatus[*unit]));
+	P1_V(diskDevSemaphores[*unit]);
 }
 
 void MMUIntHandler(int type, void *arg) {
