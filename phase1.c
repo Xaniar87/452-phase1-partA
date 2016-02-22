@@ -371,7 +371,7 @@ int P1_Join(int *status) {
 
 	P1_P(procTable[pid].sem);
 	PCB *dead = queuePop(&(procTable[pid].deadChildren));
-	status = dead->killedStatus;
+	*status = dead->killedStatus;
 	int deadPid = dead->pid;
 	procTable[deadPid].state = UNUSED;
 	procTable[deadPid].killedStatus = -1;
