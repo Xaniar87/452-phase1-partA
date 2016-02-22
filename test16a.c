@@ -53,11 +53,12 @@ int P5_Startup(void *notused)
 
 int P6_Startup(void *notused)
 {
-    USLOSS_Console("P6_Startup\n");
-	 P1_Fork("P7_Startup", P7_Startup, NULL, 4 *  USLOSS_MIN_STACK, 3);
-	P1_Join((int *)4);
-    USLOSS_Console("P6_Finished\n");
-    return 0;
+    	USLOSS_Console("P6_Startup\n");
+	P1_Fork("P7_Startup", P7_Startup, NULL, 4 *  USLOSS_MIN_STACK, 3);
+	int status = 4;
+	P1_Join(&status);
+	USLOSS_Console("P6_Finished\n");
+    	return 0;
 }
 
 

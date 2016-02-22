@@ -29,7 +29,8 @@ int P3_Startup(void *notused)
     		P1_Fork("P4_Startup", P4_Startup, NULL, 4 *  USLOSS_MIN_STACK, 5);
 	}	
 	P1_DumpProcesses();
-	int val = P1_Join((int *)2);
+	int status = 2;
+	int val = P1_Join(&status);
 	printf("P1_Join return value: %d\n", val);
 	P1_DumpProcesses();
     	P1_Fork("P8_Startup", P8_Startup, NULL, 4 *  USLOSS_MIN_STACK, 3);
