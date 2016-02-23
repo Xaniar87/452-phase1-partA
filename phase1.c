@@ -133,8 +133,7 @@ void dispatcher(void) {
 		p->startTime = USLOSS_Clock();
 		interruptsOn();
 		USLOSS_ContextSwitch(&dispatcher_context, &(p->context));
-		int finTime = USLOSS_Clock();
-		p->cpuTime = (p->cpuTime + (finTime - p->startTime));
+		p->cpuTime = P1_ReadTime();
 	}
 }
 
@@ -329,6 +328,9 @@ void P1_Quit(int status) {
 	procTable[pid].startTime = 0;
 	procTable[pid].cpuTime = 0;
 	procTable[pid].killedStatus = status;
+	if(procTable[pid].parentPid >= 0){
+		procTable[procTable[pid].parentPid].numChildren--;
+	}
 	int i;
 	// let other processes know that they are orphans by setting parentPID = -1
 	for (i = 0; i < P1_MAXPROC; i++) {
@@ -355,7 +357,7 @@ void P1_Quit(int status) {
 		int pPid = procTable[pid].parentPid;
 		queueInsert(&procTable[pid],&(procTable[pPid].deadChildren));
 		P1_V(procTable[procTable[pid].parentPid].sem);
-		procTable[procTable[pid].parentPid].numChildren--;
+		procTable[pid].parentPid = -1;
 	}
 	/*Clear dead queue for next process using this PCB.*/
 	while(procTable[pid].deadChildren != NULL){
@@ -383,7 +385,6 @@ int P1_Join(int *status) {
 	int deadPid = dead->pid;
 	procTable[deadPid].state = UNUSED;
 	procTable[deadPid].killedStatus = -1;
-	procTable[deadPid].parentPid = -1;
 	free(procTable[deadPid].name);
 	
 	interruptsOn();
@@ -468,7 +469,7 @@ void P1_DumpProcesses(void) {
 			"Pid", "Parent", "Priority", "State", "# Children", "time(uS)");
 	printf("%s\n", string);
 	for (i = 0; i < P1_MAXPROC; i++) {
-		if (procTable[i].state != UNUSED) {
+		if (procTable[i].state != UNUSED && procTable[i].state != QUIT) {
 			bytes = 0;
 			string[0] = 0;
 			bytes += sprintf(string, "%-20s", procTable[i].name);
@@ -603,7 +604,7 @@ void interruptsOn(void) {
 
 void interruptsOff(void) {
 	/*Thanks for the drill on this.*/
-	USLOSS_PsrSet(USLOSS_PsrGet() & ~(1 << USLOSS_PSR_CURRENT_INT));
+	USLOSS_PsrSet(USLOSS_PsrGet() & ~(USLOSS_PSR_CURRENT_INT));
 }
 
 void prepareDispatcherSwap(int insertReady) {
@@ -611,7 +612,6 @@ void prepareDispatcherSwap(int insertReady) {
 		procTable[pid].state = READY;
 	}
 	clockIntTicks = 0;
-	procTable[pid].cpuTime = P1_ReadTime();
 	if (insertReady && procTable[pid].state != QUIT) {
 		queuePriorityInsert(&(procTable[pid]), &readyQueue);
 	}
@@ -841,6 +841,9 @@ int P1_V(P1_Semaphore sem) {
 
 /*Checks address of sem against ALL available user semaphores. Returns 1 if invalid semaphore. Returns 0 if valid.*/
 int checkInvalidSemaphore(P1_Semaphore sem) {
+	if(sem == NULL){
+		return 1;
+	}
 	int i;
 	for (i = 0; i < P1_MAXSEM; i++) {
 		if (&(semaphoreTable[i]) == sem) {
