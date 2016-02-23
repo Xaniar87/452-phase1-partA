@@ -111,6 +111,7 @@ int permissionCheck(void);
 int checkInvalidSemaphore(P1_Semaphore sem);
 int checkDeviceSemaphore(P1_Semaphore sem);
 void prepareDispatcherSwap(int readyInsert);
+void printList(queueNode *head);
 
 /* ------------------------------------------------------------------------
  Name - dispatcher
@@ -258,6 +259,7 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize,
 			procTable[i].priority = priority;
 			// increment the current process's children count for it
 			procTable[pid].numChildren++;
+			procTable[i].cpuTime = 0;
 			if (procTable[i].processStack != NULL) {
 				free(procTable[i].processStack);
 				procTable[i].processStack = NULL;
@@ -283,7 +285,7 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize,
 			stacksize, launch);
 	numProcs++;
 
-	queuePriorityInsert(&(procTable[newPid]), &readyQueue);
+	queuePriorityInsert(&(procTable[newPid]),&readyQueue);
 	if (startUpDone && (priority < procTable[pid].priority)) {
 		prepareDispatcherSwap(1);
 	}
@@ -319,6 +321,7 @@ void P1_Quit(int status) {
 		return;
 	}
 	interruptsOff();
+	numProcs--;
 	procTable[pid].state = QUIT;
 	procTable[pid].numChildren = 0;
 	procTable[pid].startTime = 0;
@@ -334,6 +337,7 @@ void P1_Quit(int status) {
 				procTable[i].state = UNUSED;
 				procTable[i].killedStatus = -1;
 				procTable[i].parentPid = -1;
+				free(procTable[i].name);
 			}
 		}
 	}
@@ -343,9 +347,11 @@ void P1_Quit(int status) {
 		procTable[pid].state = UNUSED;
 		procTable[pid].killedStatus = -1;
 		procTable[pid].parentPid = -1;
+		free(procTable[pid].name);
 	}else{
 		/*Need to let parent know that a child has quit*/
-		queueInsert(&(procTable[pid]),&(procTable[procTable[pid].parentPid].deadChildren));
+		int pPid = procTable[pid].parentPid;
+		queueInsert(&procTable[pid],&(procTable[pPid].deadChildren));
 		P1_V(procTable[procTable[pid].parentPid].sem);
 		procTable[procTable[pid].parentPid].numChildren--;
 	}
@@ -354,7 +360,6 @@ void P1_Quit(int status) {
 		queuePop(&(procTable[pid].deadChildren));
 
 	}
-	numProcs--;
 	interruptsOn();
 	USLOSS_ContextSwitch(NULL, &dispatcher_context);
 }
@@ -370,12 +375,15 @@ int P1_Join(int *status) {
 	}
 
 	P1_P(procTable[pid].sem);
+	
 	PCB *dead = queuePop(&(procTable[pid].deadChildren));
 	*status = dead->killedStatus;
 	int deadPid = dead->pid;
 	procTable[deadPid].state = UNUSED;
 	procTable[deadPid].killedStatus = -1;
 	procTable[deadPid].parentPid = -1;
+	free(procTable[deadPid].name);
+	
 	interruptsOn();
 	return deadPid;
 }
@@ -600,6 +608,7 @@ void prepareDispatcherSwap(int insertReady) {
 	if (procTable[pid].state == RUNNING) {
 		procTable[pid].state = READY;
 	}
+	clockIntTicks = 0;
 	procTable[pid].cpuTime = P1_ReadTime();
 	if (insertReady) {
 		queuePriorityInsert(&(procTable[pid]), &readyQueue);
@@ -647,50 +656,64 @@ void queueInsert(PCB *pcb, queueNode **head) {
 		return;
 	}
 
-	queueNode **temp = head;
-	while ((*temp)->next != NULL) {
-		temp = &(*temp)->next;
+	queueNode *temp = *head;
+	while (temp->next != NULL) {
+		temp = temp->next;
 	}
-	(*temp)->next = node;
+	temp->next = node;
 	interruptsOn();
 }
 
 /*Insert into a priority queue*/
 void queuePriorityInsert(PCB *pcb, queueNode **head) {
 	interruptsOff();
-	queueNode *node = malloc(sizeof(queueNode));
-	node->pcb = pcb;
-	node->next = NULL;
-
-	if (*head == NULL) {
-		*head = node;
+	if(pcb->state == QUIT){
+		interruptsOn();
 		return;
-	} else if (pcb->priority < (*head)->pcb->priority) {
-		node->next = *head;
-		*head = node;
+	}
+	queueNode *new = malloc(sizeof(queueNode));
+	new->next = NULL;
+	new->pcb = pcb;
+	if(*head == NULL){
+		*head = new;
 		interruptsOn();
 		return;
 	}
 
-	queueNode **temp = head;
-	queueNode **prev = NULL;
-	while (*temp != NULL && (*temp)->pcb->priority <= pcb->priority) {
-		prev = temp;
-		temp = &(*temp)->next;
+	if((*head)->pcb->priority > pcb->priority){
+		new->next = *head;
+		*head = new;
+		interruptsOn();
+		return;
+	}
+	
+	queueNode *tmp = (*head)->next;
+	queueNode *prev = *head;
+	while(tmp != NULL && tmp->pcb->priority <= pcb->priority){
+		prev = tmp;
+		tmp = tmp->next;
 	}
 
-	node->next = (*prev)->next;
-	(*prev)->next = node;
+	if(tmp == NULL){
+        	if(prev->pcb->priority > pcb->priority){
+                	new->pcb = prev->pcb;
+         	       	prev->pcb = pcb;
+	        }
+		prev->next = new;
+	}else{
+		new->next = prev->next;
+		prev->next = new;
+	}
 	interruptsOn();
 }
-
 /*Debugging function*/
 void printList(queueNode *head) {
 	queueNode *tmp = head;
-	while (tmp) {
-		printf("%s\n", tmp->pcb->name);
+	while (tmp != NULL) {
+		printf("%s %d\n", tmp->pcb->name,tmp->pcb->priority);
 		tmp = tmp->next;
 	}
+	USLOSS_Trace("---\n");
 }
 
 PCB * queuePop(queueNode **head) {
@@ -837,7 +860,6 @@ void clockIntHandler(int type, void *arg) {
 	clockSumTicks++;
 	clockIntTicks++;
 	if (clockSumTicks == 5) {
-		USLOSS_Console("Got 5!\n");
 		USLOSS_DeviceInput(USLOSS_CLOCK_DEV,0,&clockDevStatus);
 		P1_V(clockDevSemaphore);
 		clockSumTicks = 0;
