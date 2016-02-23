@@ -257,9 +257,11 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize,
 			procTable[i].state = READY;
 			procTable[i].parentPid = pid;
 			procTable[i].priority = priority;
-			// increment the current process's children count for it
-			procTable[pid].numChildren++;
 			procTable[i].cpuTime = 0;
+			procTable[i].numChildren = 0;
+			procTable[i].startTime = 0;
+			procTable[i].killedStatus = 0;
+			procTable[i].blocked = 0;
 			if (procTable[i].processStack != NULL) {
 				free(procTable[i].processStack);
 				procTable[i].processStack = NULL;
@@ -284,7 +286,7 @@ int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize,
 	USLOSS_ContextInit(&(procTable[newPid].context), USLOSS_PsrGet(), stack,
 			stacksize, launch);
 	numProcs++;
-
+	procTable[pid].numChildren++;
 	queuePriorityInsert(&(procTable[newPid]),&readyQueue);
 	if (startUpDone && (priority < procTable[pid].priority)) {
 		prepareDispatcherSwap(1);
@@ -610,7 +612,7 @@ void prepareDispatcherSwap(int insertReady) {
 	}
 	clockIntTicks = 0;
 	procTable[pid].cpuTime = P1_ReadTime();
-	if (insertReady) {
+	if (insertReady && procTable[pid].state != QUIT) {
 		queuePriorityInsert(&(procTable[pid]), &readyQueue);
 	}
 	interruptsOn();
@@ -669,7 +671,7 @@ void queuePriorityInsert(PCB *pcb, queueNode **head) {
 	interruptsOff();
 	if(pcb->state == QUIT){
 		interruptsOn();
-		return;
+		//return;
 	}
 	queueNode *new = malloc(sizeof(queueNode));
 	new->next = NULL;
