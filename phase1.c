@@ -94,13 +94,11 @@ void interruptsOff(void);
 void interruptsOn(void);
 
 /* Interrupt Handlers */
-void syscallHandler(int type, void *arg);
 void clockIntHandler(int type, void *arg);
 void countDownIntHandler(int type, void *arg);
 void terminalIntHandler(int type, void *arg);
 void diskIntHandler(int type, void *arg);
 void MMUIntHandler(int type, void *arg);
-extern void sysHandler(USLOSS_Sysargs *sysArgs);
 
 /*Queue functions*/
 PCB * queuePop(queueNode **head);
@@ -183,7 +181,6 @@ void startup() {
 	}
 
 	/* Initialize interrupt handlers */
-	USLOSS_IntVec[USLOSS_SYSCALL_INT] = syscallHandler;
 	USLOSS_IntVec[USLOSS_CLOCK_INT] = clockIntHandler;
 	USLOSS_IntVec[USLOSS_ALARM_INT] = countDownIntHandler;
 	USLOSS_IntVec[USLOSS_TERM_INT] = terminalIntHandler;
@@ -362,7 +359,7 @@ void P1_Quit(int status) {
                 	queuePop(&(procTable[pid].deadChildren));
         	}
 		procTable[pid].parentPid = -1;
-		P1_V(procTable[procTable[pid].parentPid].sem);
+		P1_V(procTable[pPid].sem);
 	}
 	interruptsOn();
 	USLOSS_ContextSwitch(NULL, &dispatcher_context);
@@ -413,6 +410,7 @@ int sentinel(void *notused) {
 			}
 		}
 		if(deadLock){
+			P1_DumpProcesses();
 			USLOSS_Console("Dead lock detected. Stopping.\n");
 			USLOSS_Halt(1);
 		}
@@ -850,15 +848,6 @@ int checkInvalidSemaphore(P1_Semaphore sem) {
 		}
 	}
 	return 1;
-}
-
-void syscallHandler(int type, void *arg) {
-	if(arg == NULL){
-		P1_Quit(1);
-		return;
-	}
-	USLOSS_Sysargs *sysArgs = (USLOSS_Sysargs *) arg;
-	sysHandler(sysArgs);
 }
 
 void clockIntHandler(int type, void *arg) {

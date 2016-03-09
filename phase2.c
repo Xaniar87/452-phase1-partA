@@ -13,15 +13,18 @@ typedef struct userArgStruct {
 /*Prototypes*/
 static int ClockDriver(void *arg);
 
-static int launch(void);
+static int launch(void *arg);
 
-int permissionCheck(void);
-void interruptsOff(void);
-void interruptsOn(void);
+void sysHandler(int type, void *arg);
+
+extern int permissionCheck(void);
+extern void interruptsOff(void);
+extern void interruptsOn(void);
 void kernelMode(void);
 void userMode(void);
 
 int P2_Startup(void *arg) {
+	USLOSS_IntVec[USLOSS_SYSCALL_INT] = sysHandler;
 	P1_Semaphore running;
 	int status;
 	int pid;
@@ -65,8 +68,10 @@ int P2_Startup(void *arg) {
 	return 0;
 }
 
-void sysHandler(USLOSS_Sysargs *sysArgs) {
-	int retVal;
+void sysHandler(int type,void *arg) {
+	USLOSS_Sysargs *sysArgs = (USLOSS_Sysargs *) arg;
+	int retVal = 0;
+	int retVal2 = 0;
 	interruptsOn();
 	switch (sysArgs->number) {
 	case SYS_TERMREAD:
@@ -84,9 +89,19 @@ void sysHandler(USLOSS_Sysargs *sysArgs) {
 		}
 		break;
 	case SYS_WAIT:
+		retVal = P2_Wait(&retVal2);
+		if(retVal == -1){
+			sysArgs->arg1 = (void *)-1;
+			sysArgs->arg4 = (void *)-1;
+			sysArgs->arg2 = (void *)-1;
+		}else{
+			sysArgs->arg1 = (void *)retVal;
+			sysArgs->arg2 = (void *)retVal2;
+			sysArgs->arg4 = (void *)0;
+		}
 		break;
 	case SYS_TERMINATE:
-		P2_Terminate(sysArgs->arg1);
+		P2_Terminate((int)sysArgs->arg1);
 		break;
 	case SYS_SLEEP:
 		break;
@@ -141,15 +156,16 @@ int P2_Spawn(char *name, int (*func)(void*), void *arg, int stackSize,
 
 int launch(void *arg) {
 	userArgStruct *uas = (userArgStruct *) arg;
-	userMode();
 	interruptsOn();
+	userMode();
 	int rc = uas->func(uas->arg);
 	free(uas);
 	USLOSS_Sysargs *sysArgs = malloc(sizeof(USLOSS_Sysargs));
 	sysArgs->number = SYS_TERMINATE;
-	sysArgs->arg1 = rc;
+	sysArgs->arg1 = (void*)rc;
 	USLOSS_Syscall(sysArgs);
 	/*Never gets here*/
+	USLOSS_Console("Got Here\n");
 	return rc;
 }
 
@@ -158,6 +174,13 @@ void P2_Terminate(int status) {
 		return;
 	}
 	P1_Quit(status);
+}
+
+int P2_Wait(int *status){
+        if (permissionCheck()) {
+                return -1;
+        }
+	return P1_Join(status);
 }
 
 static int ClockDriver(void *arg) {
@@ -171,6 +194,7 @@ static int ClockDriver(void *arg) {
 	 */
 	P1_V(running);
 	while (1) {
+		goto done;
 		result = P1_WaitDevice(USLOSS_CLOCK_DEV, 0, &status);
 		if (result != 0) {
 			rc = 1;
@@ -184,32 +208,10 @@ static int ClockDriver(void *arg) {
 	done: return rc;
 }
 
-/*
- 0 == we are in kernel mode. continue.
- 1 == we are not in kernel mode. error message.
- */
-int permissionCheck(void) {
-	if ((USLOSS_PsrGet() & 0x1) < 1) {
-		USLOSS_Console(
-				"Must be in Kernel mode to perform this request. Stopping requested operation\n");
-		return 1;
-	}
-	return 0;
-}
-
-void interruptsOn(void) {
-	USLOSS_PsrSet(USLOSS_PsrGet() | USLOSS_PSR_CURRENT_INT);
-}
-
-void interruptsOff(void) {
-	/*Thanks for the drill on this.*/
-	USLOSS_PsrSet(USLOSS_PsrGet() & ~(USLOSS_PSR_CURRENT_INT));
-}
-
-void userMode(void) {
+void kernelMode(void) {
 	USLOSS_PsrSet(USLOSS_PsrGet() | USLOSS_PSR_CURRENT_MODE);
 }
 
-void kernelMode(void) {
+void userMode(void) {
 	USLOSS_PsrSet(USLOSS_PsrGet() & ~(USLOSS_PSR_CURRENT_MODE));
 }
