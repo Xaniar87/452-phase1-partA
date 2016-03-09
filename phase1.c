@@ -6,61 +6,61 @@
  */
 
 #include <stddef.h>
-#include "usloss.h"
 #include "phase1.h"
+#include "phase2.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
 typedef enum States {
-	UNUSED, RUNNING, READY, KILLED, QUIT
+        UNUSED, RUNNING, READY, KILLED, QUIT
 } State;
+
+struct semaphore;
+struct node;
+
+typedef struct PCB {
+        char *name;
+        USLOSS_Context context;
+        int (*startFunc)(void *); /* Starting function */
+        void *startArg; /* Arg to starting function */
+        int parentPid;
+        int priority;
+        State state; /* Process state */
+        int numChildren; /* Number of child processes */
+        int cpuTime; /*Total time used by process*/
+        int startTime; /*Time when the Process started running*/
+        int killedStatus; /* status given to process by kill() */
+        int pid;
+        struct semaphore *sem;  // id for the semaphore children operate on
+        struct semaphore *blockedSem; /*Semaphore that this process is blocked on*/
+        struct node *deadChildren; /*List of children that have quit without being joined.*/
+        int blocked; /*Is this process blocked?*/
+        void* processStack; /*Process stack for context*/
+} PCB;
+
+typedef struct node {
+        PCB *pcb;
+        struct node *next;
+} queueNode;
+
+typedef struct semaphore {
+        unsigned int count;
+        int id;
+        int inUse;
+        queueNode *queue;
+} semaphore;
 
 /* -------------------------- Globals ------------------------------------- */
 
 int clockSumTicks = 0;
 int clockIntTicks = 0;
 
-struct semaphore;
-struct node;
-
-typedef struct PCB {
-	char *name;
-	USLOSS_Context context;
-	int (*startFunc)(void *); /* Starting function */
-	void *startArg; /* Arg to starting function */
-	int parentPid;
-	int priority;
-	State state; /* Process state */
-	int numChildren; /* Number of child processes */
-	int cpuTime; /*Total time used by process*/
-	int startTime; /*Time when the Process started running*/
-	int killedStatus; /* status given to process by kill() */
-	int pid;
-	struct semaphore *sem;	// id for the semaphore children operate on
-	struct semaphore *blockedSem; /*Semaphore that this process is blocked on*/
-	struct node *deadChildren; /*List of children that have quit without being joined.*/
-	int blocked; /*Is this process blocked?*/
-	void* processStack; /*Process stack for context*/
-} PCB;
-
-typedef struct node {
-	PCB *pcb;
-	struct node *next;
-} queueNode;
-
-typedef struct semaphore {
-	int count;
-	int id;
-	int inUse;
-	queueNode *queue;
-} semaphore;
-
 #define LOWEST_PRIORITY 6
 #define HIGHEST_PRIORITY 0
 
 /* the process table */
-PCB procTable[P1_MAXPROC];
+static PCB procTable[P1_MAXPROC];
 
 /*Array of semaphores*/
 semaphore semaphoreTable[P1_MAXSEM];
@@ -100,6 +100,7 @@ void countDownIntHandler(int type, void *arg);
 void terminalIntHandler(int type, void *arg);
 void diskIntHandler(int type, void *arg);
 void MMUIntHandler(int type, void *arg);
+extern void sysHandler(USLOSS_Sysargs *sysArgs);
 
 /*Queue functions*/
 PCB * queuePop(queueNode **head);
@@ -230,7 +231,6 @@ void finish() {
 int P1_Fork(char *name, int (*f)(void *), void *arg, int stacksize,
 		int priority) {
 	if (permissionCheck()) {
-		interruptsOn();
 		return -1;
 	}
 	interruptsOff();
@@ -310,6 +310,7 @@ void launch(void) {
 	P1_Quit(rc);
 } /* End of launch */
 
+
 /* ------------------------------------------------------------------------
  Name - P1_Quit
  Purpose - Causes the process to quit and wait for its parent to call P1_Join.
@@ -356,13 +357,12 @@ void P1_Quit(int status) {
 		/*Need to let parent know that a child has quit*/
 		int pPid = procTable[pid].parentPid;
 		queueInsert(&procTable[pid],&(procTable[pPid].deadChildren));
-		P1_V(procTable[procTable[pid].parentPid].sem);
+        	/*Clear dead queue for next process using this PCB.*/
+        	while(procTable[pid].deadChildren != NULL){
+                	queuePop(&(procTable[pid].deadChildren));
+        	}
 		procTable[pid].parentPid = -1;
-	}
-	/*Clear dead queue for next process using this PCB.*/
-	while(procTable[pid].deadChildren != NULL){
-		queuePop(&(procTable[pid].deadChildren));
-
+		P1_V(procTable[procTable[pid].parentPid].sem);
 	}
 	interruptsOn();
 	USLOSS_ContextSwitch(NULL, &dispatcher_context);
@@ -591,8 +591,7 @@ int P1_WaitDevice(int type, int unit, int *status) {
  */
 int permissionCheck(void) {
 	if ((USLOSS_PsrGet() & 0x1) < 1) {
-		USLOSS_Console(
-				"Must be in Kernel mode to perform this request. Stopping requested operation\n");
+		USLOSS_Console("Must be in Kernel mode to perform this request. Stopping requested operation\n");
 		return 1;
 	}
 	return 0;
@@ -854,11 +853,12 @@ int checkInvalidSemaphore(P1_Semaphore sem) {
 }
 
 void syscallHandler(int type, void *arg) {
-	USLOSS_Sysargs *argStruct = (USLOSS_Sysargs *) arg;
-	char string[50];
-	sprintf(string, "System call %d not implemented\n", argStruct->number);
-	USLOSS_Console(string);
-	P1_Quit(1);
+	if(arg == NULL){
+		P1_Quit(1);
+		return;
+	}
+	USLOSS_Sysargs *sysArgs = (USLOSS_Sysargs *) arg;
+	sysHandler(sysArgs);
 }
 
 void clockIntHandler(int type, void *arg) {
@@ -873,25 +873,22 @@ void clockIntHandler(int type, void *arg) {
 		clockIntTicks = 0;
 		prepareDispatcherSwap(1);
 	}
-
-	return;
 }
 
 void countDownIntHandler(int type, void *arg) {
 	USLOSS_DeviceInput(USLOSS_ALARM_DEV,0,&alarmDevStatus);
 	P1_V(alarmDevSemaphore);
 }
-
 void terminalIntHandler(int type, void *arg) {
-	int* unit = (int *) arg;
-	USLOSS_DeviceInput(USLOSS_TERM_DEV,*unit,&(terminalDevStatus[*unit]));
-	P1_V(terminalDevSemaphores[*unit]);
+	int unit = (int) arg;
+	USLOSS_DeviceInput(USLOSS_TERM_DEV,unit,&(terminalDevStatus[unit]));
+	P1_V(terminalDevSemaphores[unit]);
 }
 
 void diskIntHandler(int type, void *arg) {
-	int* unit = (int *) arg;
-	USLOSS_DeviceInput(USLOSS_DISK_DEV,*unit,&(diskDevStatus[*unit]));
-	P1_V(diskDevSemaphores[*unit]);
+	int unit = (int) arg;
+	USLOSS_DeviceInput(USLOSS_DISK_DEV,unit,&(diskDevStatus[unit]));
+	P1_V(diskDevSemaphores[unit]);
 }
 
 void MMUIntHandler(int type, void *arg) {
