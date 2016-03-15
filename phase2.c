@@ -1,7 +1,18 @@
+/*
+ 452 Phase 2 Part A
+ Authors:
+ Matt Seall
+ Zachary Nixon
+ */
 #include <stdlib.h>
 #include <phase1.h>
 #include <phase2.h>
 #include "usyscall.h"
+#include <stdio.h>
+#include <string.h>
+#include <libuser.h>
+
+#define US_IN_S 1000000
 
 /* Structs */
 
@@ -10,21 +21,74 @@ typedef struct userArgStruct {
 	void *arg;
 } userArgStruct;
 
+typedef struct mailboxMessage{
+	void *buf;
+	int bufSize;
+	struct mailboxMessage *next;
+} message;
+
+typedef struct clockDriverStruct{
+	int inUse;
+	P1_Semaphore sem;
+	long startTime;
+	long waitingTime;
+} clockDriverStruct;
+
+typedef struct mailbox{
+	int id;
+	int inUse;
+	int maxSlots;
+	int activeSlots;
+	int maximumMessageSize;
+	P1_Semaphore mutex;
+	P1_Semaphore fulls;
+	P1_Semaphore empties;
+	message *queue;
+} mailbox;
+
 /*Prototypes*/
 static int ClockDriver(void *arg);
-
 static int launch(void *arg);
+
+static void queueInsert(void *m,int size,message **head);
+static message * queuePop(message **head);
 
 void sysHandler(int type, void *arg);
 
-extern int permissionCheck(void);
-extern void interruptsOff(void);
-extern void interruptsOn(void);
-void kernelMode(void);
+int permissionCheck(void);
+void interruptsOff(void);
+void interruptsOn(void);
 void userMode(void);
 
+/*All mailboxes*/
+mailbox mailboxes[P2_MAX_MBOX];
+
+/*The list of processes waiting on the clock driver struct*/
+clockDriverStruct clockList[P1_MAXPROC];
+
+/*Guard mailbox list*/
+P1_Semaphore mBoxSemaphore;
+
+/*Guard clock list*/
+P1_Semaphore clockListSemaphore;
 int P2_Startup(void *arg) {
 	USLOSS_IntVec[USLOSS_SYSCALL_INT] = sysHandler;
+	/*Init all mailboxes*/
+	int i;
+	for(i = 0; i < P2_MAX_MBOX;i++){
+		mailboxes[i].id = i;
+		mailboxes[i].inUse = 0;
+		mailboxes[i].queue = NULL;
+		mailboxes[i].activeSlots = 0;
+	}
+
+	for(i = 0; i < P1_MAXPROC;i++){
+		clockList[i].inUse = 0;
+	}
+
+	mBoxSemaphore = P1_SemCreate(1);
+	clockListSemaphore = P1_SemCreate(1);
+
 	P1_Semaphore running;
 	int status;
 	int pid;
@@ -69,16 +133,20 @@ int P2_Startup(void *arg) {
 }
 
 void sysHandler(int type,void *arg) {
+	if(arg == NULL){
+		USLOSS_Console("USLOSS_Sysargs is NULL!\n");
+		return;
+	}
 	USLOSS_Sysargs *sysArgs = (USLOSS_Sysargs *) arg;
 	int retVal = 0;
 	int retVal2 = 0;
 	interruptsOn();
 	switch (sysArgs->number) {
-	case SYS_TERMREAD:
+	case SYS_TERMREAD: 
 		break;
 	case SYS_TERMWRITE:
 		break;
-	case SYS_SPAWN:
+	case SYS_SPAWN: //Part 1
 		retVal = P2_Spawn(sysArgs->arg5, sysArgs->arg1, sysArgs->arg2,
 				(int) sysArgs->arg3, (int) sysArgs->arg4);
 		if (retVal == -3 || retVal == -2) {
@@ -88,7 +156,7 @@ void sysHandler(int type,void *arg) {
 			sysArgs->arg4 = (void *) 0;
 		}
 		break;
-	case SYS_WAIT:
+	case SYS_WAIT: //Part 1
 		retVal = P2_Wait(&retVal2);
 		if(retVal == -1){
 			sysArgs->arg1 = (void *)-1;
@@ -100,42 +168,84 @@ void sysHandler(int type,void *arg) {
 			sysArgs->arg4 = (void *)0;
 		}
 		break;
-	case SYS_TERMINATE:
+	case SYS_TERMINATE: //Part 1
 		P2_Terminate((int)sysArgs->arg1);
 		break;
-	case SYS_SLEEP:
+	case SYS_SLEEP: // Part 1
+		retVal = P2_Sleep((int)sysArgs->arg1);
+		sysArgs->arg4 = (void *) retVal;
 		break;
 	case SYS_DISKREAD:
 		break;
 	case SYS_DISKWRITE:
 		break;
-	case SYS_GETTIMEOFDAY:
+	case SYS_GETTIMEOFDAY: //Part 1
+		sysArgs->arg1 = (void *)USLOSS_Clock();
 		break;
-	case SYS_CPUTIME:
+	case SYS_CPUTIME: //Part 1
+		sysArgs->arg1 = (void *)P1_ReadTime();
 		break;
-	case SYS_DUMPPROCESSES:
+	case SYS_DUMPPROCESSES: //Part 1
+		P1_DumpProcesses();
 		break;
-	case SYS_GETPID:
+	case SYS_GETPID: //Part 1
+		sysArgs->arg1 = (void *) P1_GetPID();
 		break;
-	case SYS_SEMCREATE:
+	case SYS_SEMCREATE: //Part 1
+		retVal = (int)sysArgs->arg1;
+		if(retVal < 0){
+			sysArgs->arg4 = (void *)-1;
+		}else{
+			sysArgs->arg4 = (void *)0;
+			sysArgs->arg1 = (void *) P1_SemCreate(retVal);
+		}
 		break;
-	case SYS_SEMP:
+	case SYS_SEMP: // Part 1
+		retVal = P1_P((P1_Semaphore)sysArgs->arg1);
+		if(retVal < 0){
+			sysArgs->arg4 = (void *) -1;
+		}
+		else{
+			sysArgs->arg4 = (void *) 0;
+		}
 		break;
-	case SYS_SEMV:
+	case SYS_SEMV: // Part 1
+		retVal = P1_V((P1_Semaphore)sysArgs->arg1);
+		if(retVal < 0){
+			sysArgs->arg4 = (void *) -1;
+		}
+		else{
+			sysArgs->arg4 = (void *) 0;
+		}
 		break;
-	case SYS_SEMFREE:
+	case SYS_SEMFREE: // Part 1
+		retVal = P1_SemFree((P1_Semaphore)sysArgs->arg1);
+		if(retVal < 0){
+			sysArgs->arg4 = (void *) -1;
+		}
+		else{
+			sysArgs->arg4 = (void *) 0;
+		}
 		break;
-	case SYS_MBOXCREATE:
+	case SYS_MBOXCREATE: //Part 1
+		retVal = P2_MboxCreate((int)sysArgs->arg1,(int)sysArgs->arg2);
+		if(retVal == -2){
+			sysArgs->arg1 = (void *) -1;
+			sysArgs->arg4 = (void *) -1;
+		}else{
+			sysArgs->arg1 = (void *) retVal;
+			sysArgs->arg4 = (void *) 0;
+		}
 		break;
-	case SYS_MBOXRELEASE:
+	case SYS_MBOXRELEASE: // Part 1
 		break;
-	case SYS_MBOXSEND:
+	case SYS_MBOXSEND: // Part 1
 		break;
-	case SYS_MBOXRECEIVE:
+	case SYS_MBOXRECEIVE: // Part 1
 		break;
-	case SYS_MBOXCONDSEND:
+	case SYS_MBOXCONDSEND: // Part 1
 		break;
-	case SYS_MBOXCONDRECEIVE:
+	case SYS_MBOXCONDRECEIVE: // Part 1
 		break;
 	default:
 		P1_Quit(1);
@@ -160,12 +270,8 @@ int launch(void *arg) {
 	userMode();
 	int rc = uas->func(uas->arg);
 	free(uas);
-	USLOSS_Sysargs *sysArgs = malloc(sizeof(USLOSS_Sysargs));
-	sysArgs->number = SYS_TERMINATE;
-	sysArgs->arg1 = (void*)rc;
-	USLOSS_Syscall(sysArgs);
+	Sys_Terminate(rc);
 	/*Never gets here*/
-	USLOSS_Console("Got Here\n");
 	return rc;
 }
 
@@ -181,6 +287,184 @@ int P2_Wait(int *status){
                 return -1;
         }
 	return P1_Join(status);
+}
+
+int P2_Sleep(int seconds){
+	if(permissionCheck() || seconds < 0){
+		return -1;
+	}
+	P1_Semaphore s = P1_SemCreate(0);
+	P1_P(clockListSemaphore);
+	int i;
+	for(i = 0; i < P1_MAXPROC;i++){
+		if(clockList[i].inUse == 0){
+			clockList[i].inUse = 1;
+			clockList[i].sem = s;
+			clockList[i].startTime = USLOSS_Clock();
+			clockList[i].waitingTime = seconds * US_IN_S;
+		}
+	}
+	P1_V(clockListSemaphore);
+	P1_P(s);
+	P1_SemFree(s);
+	return 0;
+}
+
+int P2_MboxCreate(int slots, int size){
+	if(permissionCheck()){
+		return -1;
+	}
+	P1_P(mBoxSemaphore);
+	if(slots <= 0 || size < 0){
+		P1_V(mBoxSemaphore);
+		return -2;
+	}
+	int i;
+	for(i = 0; i < P2_MAX_MBOX;i++){
+		if(mailboxes[i].inUse == 0){
+			mailboxes[i].inUse = 1;
+			mailboxes[i].maxSlots = slots;
+			mailboxes[i].maximumMessageSize = size;
+			mailboxes[i].mutex = P1_SemCreate(1);
+			mailboxes[i].empties = P1_SemCreate(slots);
+			mailboxes[i].fulls = P1_SemCreate(0);
+			mailboxes[i].queue = NULL;
+			mailboxes[i].activeSlots = 0;
+			P1_V(mBoxSemaphore);
+			return i;
+		}
+	}
+	P1_V(mBoxSemaphore);
+	return -1;
+}
+
+int P2_MboxRelease(int mbox){
+	if(permissionCheck()){
+		return -1;
+	}
+	P1_P(mBoxSemaphore);
+	int i;
+	for(i = 0; i < P2_MAX_MBOX;i++){
+		if(mailboxes[i].inUse && mailboxes[i].id == mbox){
+			if(P1_SemFree(mailboxes[i].mutex) != 0){
+				USLOSS_Console("Processes waiting on mailbox. Halting.\n");
+				USLOSS_Halt(1);
+			}
+			if(P1_SemFree(mailboxes[i].fulls) != 0){
+				USLOSS_Console("Processes waiting on mailbox. Halting.\n");
+				USLOSS_Halt(1);
+			}
+			if(P1_SemFree(mailboxes[i].empties) != 0){
+				USLOSS_Console("Processes waiting on mailbox. Halting.\n");
+				USLOSS_Halt(1);
+			}
+
+			while(mailboxes[i].queue != NULL){
+				message *m = queuePop(&(mailboxes[i].queue));
+				free(m->buf);
+				free(m);
+			}
+			mailboxes[i].inUse = 0;
+			P1_V(mBoxSemaphore);
+			return 0;
+		}
+	}
+	P1_V(mBoxSemaphore);
+	return -1;
+}
+
+int P2_MboxSend(int mbox, void *msg, int *size){
+	if(mbox < 0 || mbox >= P2_MAX_MBOX || mailboxes[mbox].inUse != 1 || mailboxes[mbox].maximumMessageSize < *size){
+		return -1;
+	}
+
+	mailbox *cur = &(mailboxes[mbox]);
+	P1_P(cur->empties);
+	P1_P(cur->mutex);
+	void *m = malloc(sizeof(char) * (*size));
+	memcpy(m,msg,*size);
+	queueInsert(m,*size,&(cur->queue));
+	cur->activeSlots++;
+	P1_V(cur->mutex);
+	P1_V(cur->fulls);
+	return 0;
+}
+
+int P2_MboxCondSend(int mbox, void *msg, int *size){
+	if(mbox < 0 || mbox >= P2_MAX_MBOX || mailboxes[mbox].inUse != 1 || mailboxes[mbox].maximumMessageSize < *size){
+		return -1;
+	}
+
+	mailbox *cur = &(mailboxes[mbox]);
+	P1_P(cur->mutex);
+	if(cur->activeSlots < cur->maxSlots){
+		P1_P(cur->empties); //Never blocks.
+		void *m = malloc(sizeof(char) * (*size));
+		memcpy(m,msg,*size);
+		queueInsert(m,*size,&(cur->queue));
+		cur->activeSlots++;
+		P1_V(cur->mutex);
+		P1_V(cur->fulls);
+		return 0;
+	}
+	P1_V(cur->mutex);
+	return 1;
+}
+
+int P2_MboxReceive(int mbox, void *msg, int *size){
+	if(mbox < 0 || mbox >= P2_MAX_MBOX || mailboxes[mbox].inUse != 1){
+		return -1;
+	}
+	mailbox *cur = &(mailboxes[mbox]);
+	P1_P(cur->fulls);
+	P1_P(cur->mutex);
+
+	message *m = queuePop(&(cur->queue));
+	int retVal = 0;
+	if(*size > m->bufSize){
+		retVal = m->bufSize;
+	}else{
+		retVal = *size;
+	}
+	memcpy(msg,m->buf,retVal);
+	free(m->buf);
+	free(m);
+	cur->activeSlots--;
+	P1_V(cur->mutex);
+	P1_V(cur->empties);
+	return retVal;
+}
+
+/*
+ * 0 >= bytes write
+ * -1 = invalid args
+ * -2 = no message
+ */
+int P2_MboxCondReceive(int mbox, void *msg, int *size){
+	if(mbox < 0 || mbox >= P2_MAX_MBOX || mailboxes[mbox].inUse != 1){
+		return -1;
+	}
+	mailbox *cur = &(mailboxes[mbox]);
+	P1_P(cur->mutex);
+	if(cur->activeSlots == 0){
+		P1_P(cur->fulls); //Never blocks
+		message *m = queuePop(&(cur->queue));
+		int retVal = 0;
+		if(*size > m->bufSize){
+			retVal = m->bufSize;
+		}else{
+			retVal = *size;
+		}
+		memcpy(msg,m->buf,retVal);
+		free(m->buf);
+		free(m);
+		cur->activeSlots--;
+		P1_V(cur->mutex);
+		P1_V(cur->empties);
+		return retVal;
+	}
+	P1_V(cur->mutex);
+	return -2;
 }
 
 static int ClockDriver(void *arg) {
@@ -204,12 +488,66 @@ static int ClockDriver(void *arg) {
 		 * Compute the current time and wake up any processes
 		 * whose time has come.
 		 */
+		P1_P(clockListSemaphore);
+		int i;
+		long now = USLOSS_Clock();
+		for(i = 0; i < P1_MAXPROC;i++){
+			if(clockList[i].inUse == 1){
+				if((now - clockList[i].startTime) >= clockList[i].waitingTime){
+					P1_V(clockList[i].sem);
+					clockList[i].inUse = 0;
+				}
+			}
+		}
+
+		P1_V(clockListSemaphore);
 	}
 	done: return rc;
 }
 
-void kernelMode(void) {
-	USLOSS_PsrSet(USLOSS_PsrGet() | USLOSS_PSR_CURRENT_MODE);
+void queueInsert(void *m,int size,message **head) {
+	message *node = malloc(sizeof(message));
+	node->buf = m;
+	node->next = NULL;
+	node->bufSize = size;
+
+	if (*head == NULL) {
+		*head = node;
+		return;
+	}
+
+	message *temp = *head;
+	while (temp->next != NULL) {
+		temp = temp->next;
+	}
+	temp->next = node;
+}
+
+message * queuePop(message **head) {
+	message *tmp = *head;
+	*head = (*head)->next;
+	return tmp;
+}
+
+/*
+ 0 == we are in kernel mode. continue.
+ 1 == we are not in kernel mode. error message.
+ */
+int permissionCheck(void) {
+	if ((USLOSS_PsrGet() & 0x1) < 1) {
+		USLOSS_Console("Must be in Kernel mode to perform this request. Stopping requested operation\n");
+		return 1;
+	}
+	return 0;
+}
+
+void interruptsOn(void) {
+	USLOSS_PsrSet(USLOSS_PsrGet() | USLOSS_PSR_CURRENT_INT);
+}
+
+void interruptsOff(void) {
+	/*Thanks for the drill on this.*/
+	USLOSS_PsrSet(USLOSS_PsrGet() & ~(USLOSS_PSR_CURRENT_INT));
 }
 
 void userMode(void) {

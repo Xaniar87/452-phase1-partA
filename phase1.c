@@ -90,8 +90,8 @@ int startUpDone = 0;
 /* OS control functions */
 static int sentinel(void *arg);
 static void launch(void);
-void interruptsOff(void);
-void interruptsOn(void);
+static void interruptsOff(void);
+static void interruptsOn(void);
 
 /* Interrupt Handlers */
 void clockIntHandler(int type, void *arg);
@@ -101,12 +101,12 @@ void diskIntHandler(int type, void *arg);
 void MMUIntHandler(int type, void *arg);
 
 /*Queue functions*/
-PCB * queuePop(queueNode **head);
-void queuePriorityInsert(PCB *pcb, queueNode **head);
-void queueInsert(PCB *pcb, queueNode **head);
+static PCB * queuePop(queueNode **head);
+static void queuePriorityInsert(PCB *pcb, queueNode **head);
+static void queueInsert(PCB *pcb, queueNode **head);
 
 /*Misc*/
-int permissionCheck(void);
+static int permissionCheck(void);
 int checkInvalidSemaphore(P1_Semaphore sem);
 int checkDeviceSemaphore(P1_Semaphore sem);
 void prepareDispatcherSwap(int readyInsert);
@@ -712,7 +712,6 @@ void printList(queueNode *head) {
 		printf("%s %d\n", tmp->pcb->name,tmp->pcb->priority);
 		tmp = tmp->next;
 	}
-	USLOSS_Trace("---\n");
 }
 
 PCB * queuePop(queueNode **head) {
