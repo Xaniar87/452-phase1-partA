@@ -587,7 +587,7 @@ int P1_WaitDevice(int type, int unit, int *status) {
  0 == we are in kernel mode. continue.
  1 == we are not in kernel mode. error message.
  */
-int permissionCheck(void) {
+static int permissionCheck(void) {
 	if ((USLOSS_PsrGet() & 0x1) < 1) {
 		USLOSS_Console("Must be in Kernel mode to perform this request. Stopping requested operation\n");
 		return 1;
@@ -595,11 +595,11 @@ int permissionCheck(void) {
 	return 0;
 }
 
-void interruptsOn(void) {
+static void interruptsOn(void) {
 	USLOSS_PsrSet(USLOSS_PsrGet() | USLOSS_PSR_CURRENT_INT);
 }
 
-void interruptsOff(void) {
+static void interruptsOff(void) {
 	/*Thanks for the drill on this.*/
 	USLOSS_PsrSet(USLOSS_PsrGet() & ~(USLOSS_PSR_CURRENT_INT));
 }

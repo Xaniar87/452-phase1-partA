@@ -55,10 +55,9 @@ static message * queuePop(message **head);
 
 void sysHandler(int type, void *arg);
 
-int permissionCheck(void);
-void interruptsOff(void);
-void interruptsOn(void);
-void userMode(void);
+static int permissionCheck(void);
+static void interruptsOn(void);
+static void userMode(void);
 
 /*All mailboxes*/
 mailbox mailboxes[P2_MAX_MBOX];
@@ -118,7 +117,6 @@ int P2_Startup(void *arg) {
 	 */
 	pid = P2_Spawn("P3_Startup", P3_Startup, NULL, 4 * USLOSS_MIN_STACK, 3);
 	pid = P2_Wait(&status);
-
 	/*
 	 * Kill the device drivers
 	 */
@@ -129,6 +127,7 @@ int P2_Startup(void *arg) {
 	 * Join with the device drivers.
 	 */
 	// ...
+	USLOSS_Halt(0);
 	return 0;
 }
 
@@ -238,14 +237,52 @@ void sysHandler(int type,void *arg) {
 		}
 		break;
 	case SYS_MBOXRELEASE: // Part 1
+		retVal = P2_MboxRelease((int)sysArgs->arg1);
+		if(retVal < 0){
+			sysArgs->arg4 = (void *) -1;
+		}else{
+			sysArgs->arg4 = (void *) 0;
+		}
 		break;
 	case SYS_MBOXSEND: // Part 1
+		retVal = P2_MboxSend((int)sysArgs->arg1,sysArgs->arg2,(int *)sysArgs->arg3);
+		if(retVal < 0){
+			sysArgs->arg4 = (void *) -1;
+		}else{
+			sysArgs->arg4 = (void *) 0;
+		}
 		break;
 	case SYS_MBOXRECEIVE: // Part 1
+                retVal = P2_MboxReceive((int)sysArgs->arg1,sysArgs->arg2,(int *)sysArgs->arg3);
+                if(retVal < 0){
+                        sysArgs->arg4 = (void *) -1;
+                }else{
+                        sysArgs->arg4 = (void *) 0;
+			sysArgs->arg2 = (void *) retVal;
+                }
 		break;
 	case SYS_MBOXCONDSEND: // Part 1
+                retVal = P2_MboxCondSend((int)sysArgs->arg1,sysArgs->arg2,(int *)sysArgs->arg3);
+                if(retVal < 0){
+                        sysArgs->arg4 = (void *) -1;
+                }else if(retVal == 1){
+			sysArgs->arg4 = (void *) 1;
+		}
+		else{
+                        sysArgs->arg4 = (void *) 0;
+                }
 		break;
 	case SYS_MBOXCONDRECEIVE: // Part 1
+                retVal = P2_MboxCondReceive((int)sysArgs->arg1,sysArgs->arg2,(int *)sysArgs->arg3);
+                if(retVal < 0){
+                        sysArgs->arg4 = (void *) -1;
+                }else if(retVal == 1){
+                        sysArgs->arg4 = (void *) 1;
+                }
+                else{
+                        sysArgs->arg4 = (void *) 0;
+			sysArgs->arg2 = (void *) retVal;
+                }
 		break;
 	default:
 		P1_Quit(1);
@@ -381,7 +418,7 @@ int P2_MboxSend(int mbox, void *msg, int *size){
 	mailbox *cur = &(mailboxes[mbox]);
 	P1_P(cur->empties);
 	P1_P(cur->mutex);
-	void *m = malloc(sizeof(char) * (*size));
+	void *m = malloc(*size);
 	memcpy(m,msg,*size);
 	queueInsert(m,*size,&(cur->queue));
 	cur->activeSlots++;
@@ -399,7 +436,7 @@ int P2_MboxCondSend(int mbox, void *msg, int *size){
 	P1_P(cur->mutex);
 	if(cur->activeSlots < cur->maxSlots){
 		P1_P(cur->empties); //Never blocks.
-		void *m = malloc(sizeof(char) * (*size));
+		void *m = malloc(*size);
 		memcpy(m,msg,*size);
 		queueInsert(m,*size,&(cur->queue));
 		cur->activeSlots++;
@@ -468,17 +505,20 @@ int P2_MboxCondReceive(int mbox, void *msg, int *size){
 }
 
 static int ClockDriver(void *arg) {
+	interruptsOn();
 	P1_Semaphore running = (P1_Semaphore) arg;
 	int result;
 	int status;
 	int rc = 0;
-
+	int myPID = P1_GetPID();
 	/*
 	 * Let the parent know we are running and enable interrupts.
 	 */
 	P1_V(running);
 	while (1) {
-		goto done;
+		if(P1_GetState(myPID) == 2){
+			goto done;
+		}	
 		result = P1_WaitDevice(USLOSS_CLOCK_DEV, 0, &status);
 		if (result != 0) {
 			rc = 1;
@@ -533,7 +573,7 @@ message * queuePop(message **head) {
  0 == we are in kernel mode. continue.
  1 == we are not in kernel mode. error message.
  */
-int permissionCheck(void) {
+static int permissionCheck(void) {
 	if ((USLOSS_PsrGet() & 0x1) < 1) {
 		USLOSS_Console("Must be in Kernel mode to perform this request. Stopping requested operation\n");
 		return 1;
@@ -541,15 +581,10 @@ int permissionCheck(void) {
 	return 0;
 }
 
-void interruptsOn(void) {
+static void interruptsOn(void) {
 	USLOSS_PsrSet(USLOSS_PsrGet() | USLOSS_PSR_CURRENT_INT);
 }
 
-void interruptsOff(void) {
-	/*Thanks for the drill on this.*/
-	USLOSS_PsrSet(USLOSS_PsrGet() & ~(USLOSS_PSR_CURRENT_INT));
-}
-
-void userMode(void) {
+static void userMode(void) {
 	USLOSS_PsrSet(USLOSS_PsrGet() & ~(USLOSS_PSR_CURRENT_MODE));
 }
