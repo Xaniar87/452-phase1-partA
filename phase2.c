@@ -148,8 +148,9 @@ void sysHandler(int type,void *arg) {
 	case SYS_SPAWN: //Part 1
 		retVal = P2_Spawn(sysArgs->arg5, sysArgs->arg1, sysArgs->arg2,
 				(int) sysArgs->arg3, (int) sysArgs->arg4);
-		if (retVal == -3 || retVal == -2) {
+		if (retVal < 0) {
 			sysArgs->arg4 = (void *) -1;
+			sysArgs->arg1 = (void *) -1;
 		} else {
 			sysArgs->arg1 = (void *) retVal;
 			sysArgs->arg4 = (void *) 0;
@@ -245,7 +246,7 @@ void sysHandler(int type,void *arg) {
 		}
 		break;
 	case SYS_MBOXSEND: // Part 1
-		retVal = P2_MboxSend((int)sysArgs->arg1,sysArgs->arg2,(int *)sysArgs->arg3);
+		retVal = P2_MboxSend((int)sysArgs->arg1,sysArgs->arg2,(int *)&sysArgs->arg3);
 		if(retVal < 0){
 			sysArgs->arg4 = (void *) -1;
 		}else{
@@ -253,7 +254,7 @@ void sysHandler(int type,void *arg) {
 		}
 		break;
 	case SYS_MBOXRECEIVE: // Part 1
-                retVal = P2_MboxReceive((int)sysArgs->arg1,sysArgs->arg2,(int *)sysArgs->arg3);
+                retVal = P2_MboxReceive((int)sysArgs->arg1,sysArgs->arg2,(int *)&sysArgs->arg3);
                 if(retVal < 0){
                         sysArgs->arg4 = (void *) -1;
                 }else{
@@ -262,10 +263,10 @@ void sysHandler(int type,void *arg) {
                 }
 		break;
 	case SYS_MBOXCONDSEND: // Part 1
-                retVal = P2_MboxCondSend((int)sysArgs->arg1,sysArgs->arg2,(int *)sysArgs->arg3);
-                if(retVal < 0){
+                retVal = P2_MboxCondSend((int)sysArgs->arg1,sysArgs->arg2,(int *)&sysArgs->arg3);
+                if(retVal == -1){
                         sysArgs->arg4 = (void *) -1;
-                }else if(retVal == 1){
+                }else if(retVal == -2){
 			sysArgs->arg4 = (void *) 1;
 		}
 		else{
@@ -273,10 +274,10 @@ void sysHandler(int type,void *arg) {
                 }
 		break;
 	case SYS_MBOXCONDRECEIVE: // Part 1
-                retVal = P2_MboxCondReceive((int)sysArgs->arg1,sysArgs->arg2,(int *)sysArgs->arg3);
-                if(retVal < 0){
+                retVal = P2_MboxCondReceive((int)sysArgs->arg1,sysArgs->arg2,(int *)&sysArgs->arg3);
+                if(retVal == -1){
                         sysArgs->arg4 = (void *) -1;
-                }else if(retVal == 1){
+                }else if(retVal == -2){
                         sysArgs->arg4 = (void *) 1;
                 }
                 else{
@@ -445,7 +446,7 @@ int P2_MboxCondSend(int mbox, void *msg, int *size){
 		return 0;
 	}
 	P1_V(cur->mutex);
-	return 1;
+	return -2;
 }
 
 int P2_MboxReceive(int mbox, void *msg, int *size){
@@ -455,7 +456,6 @@ int P2_MboxReceive(int mbox, void *msg, int *size){
 	mailbox *cur = &(mailboxes[mbox]);
 	P1_P(cur->fulls);
 	P1_P(cur->mutex);
-
 	message *m = queuePop(&(cur->queue));
 	int retVal = 0;
 	if(*size > m->bufSize){
@@ -483,7 +483,7 @@ int P2_MboxCondReceive(int mbox, void *msg, int *size){
 	}
 	mailbox *cur = &(mailboxes[mbox]);
 	P1_P(cur->mutex);
-	if(cur->activeSlots == 0){
+	if(cur->activeSlots != 0){
 		P1_P(cur->fulls); //Never blocks
 		message *m = queuePop(&(cur->queue));
 		int retVal = 0;
