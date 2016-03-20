@@ -412,7 +412,7 @@ int P2_MboxRelease(int mbox){
 }
 
 int P2_MboxSend(int mbox, void *msg, int *size){
-	if(mbox < 0 || mbox >= P2_MAX_MBOX || mailboxes[mbox].inUse != 1 || mailboxes[mbox].maximumMessageSize < *size){
+	if(mbox < 0 || mbox >= P2_MAX_MBOX || mailboxes[mbox].inUse != 1 || mailboxes[mbox].maximumMessageSize < *size || permissionCheck()){
 		return -1;
 	}
 
@@ -429,7 +429,7 @@ int P2_MboxSend(int mbox, void *msg, int *size){
 }
 
 int P2_MboxCondSend(int mbox, void *msg, int *size){
-	if(mbox < 0 || mbox >= P2_MAX_MBOX || mailboxes[mbox].inUse != 1 || mailboxes[mbox].maximumMessageSize < *size){
+	if(mbox < 0 || mbox >= P2_MAX_MBOX || mailboxes[mbox].inUse != 1 || mailboxes[mbox].maximumMessageSize < *size || permissionCheck()){
 		return -1;
 	}
 
@@ -450,7 +450,7 @@ int P2_MboxCondSend(int mbox, void *msg, int *size){
 }
 
 int P2_MboxReceive(int mbox, void *msg, int *size){
-	if(mbox < 0 || mbox >= P2_MAX_MBOX || mailboxes[mbox].inUse != 1){
+	if(mbox < 0 || mbox >= P2_MAX_MBOX || mailboxes[mbox].inUse != 1 || permissionCheck()){
 		return -1;
 	}
 	mailbox *cur = &(mailboxes[mbox]);
@@ -478,7 +478,7 @@ int P2_MboxReceive(int mbox, void *msg, int *size){
  * -2 = no message
  */
 int P2_MboxCondReceive(int mbox, void *msg, int *size){
-	if(mbox < 0 || mbox >= P2_MAX_MBOX || mailboxes[mbox].inUse != 1){
+	if(mbox < 0 || mbox >= P2_MAX_MBOX || mailboxes[mbox].inUse != 1 || permissionCheck()){
 		return -1;
 	}
 	mailbox *cur = &(mailboxes[mbox]);
