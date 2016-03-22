@@ -46,18 +46,25 @@ typedef struct mailbox{
 	message *queue;
 } mailbox;
 
+typedef struct usem{
+	int id;
+	P1_Semaphore sem;
+	int inUse;	
+} usem;
+
 /*Prototypes*/
 static int ClockDriver(void *arg);
 static int launch(void *arg);
-
 static void queueInsert(void *m,int size,message **head);
 static message * queuePop(message **head);
-
 void sysHandler(int type, void *arg);
-
 static int permissionCheck(void);
 static void interruptsOn(void);
 static void userMode(void);
+void wakeUpProcesses(void);
+int semAdd(P1_Semaphore s);
+int semDelete(int id);
+int validSem(int id);
 
 /*All mailboxes*/
 mailbox mailboxes[P2_MAX_MBOX];
@@ -70,6 +77,10 @@ P1_Semaphore mBoxSemaphore;
 
 /*Guard clock list*/
 P1_Semaphore clockListSemaphore;
+
+usem userSemList[P1_MAXSEM];
+P1_Semaphore semGuard;
+
 int P2_Startup(void *arg) {
 	USLOSS_IntVec[USLOSS_SYSCALL_INT] = sysHandler;
 	/*Init all mailboxes*/
@@ -84,9 +95,15 @@ int P2_Startup(void *arg) {
 	for(i = 0; i < P1_MAXPROC;i++){
 		clockList[i].inUse = 0;
 	}
+	
+	for(i = 0; i < P1_MAXSEM;i++){
+		userSemList[i].id = i;
+		userSemList[i].inUse = 0;
+	}
 
 	mBoxSemaphore = P1_SemCreate(1);
 	clockListSemaphore = P1_SemCreate(1);
+	semGuard = P1_SemCreate(1);
 
 	P1_Semaphore running;
 	int status;
@@ -148,7 +165,7 @@ void sysHandler(int type,void *arg) {
 	case SYS_SPAWN: //Part 1
 		retVal = P2_Spawn(sysArgs->arg5, sysArgs->arg1, sysArgs->arg2,
 				(int) sysArgs->arg3, (int) sysArgs->arg4);
-		if (retVal < 0) {
+		if (retVal == -3 || retVal == -2) {
 			sysArgs->arg4 = (void *) -1;
 			sysArgs->arg1 = (void *) -1;
 		} else {
@@ -197,11 +214,15 @@ void sysHandler(int type,void *arg) {
 			sysArgs->arg4 = (void *)-1;
 		}else{
 			sysArgs->arg4 = (void *)0;
-			sysArgs->arg1 = (void *) P1_SemCreate(retVal);
+			sysArgs->arg1 = (void *) semAdd(P1_SemCreate(retVal));
 		}
 		break;
 	case SYS_SEMP: // Part 1
-		retVal = P1_P((P1_Semaphore)sysArgs->arg1);
+		if(validSem((int)sysArgs->arg1) == 0){
+			sysArgs->arg4 = (void *) -1;
+			return;
+		}
+		retVal = P1_P(userSemList[(int)sysArgs->arg1].sem);
 		if(retVal < 0){
 			sysArgs->arg4 = (void *) -1;
 		}
@@ -210,7 +231,11 @@ void sysHandler(int type,void *arg) {
 		}
 		break;
 	case SYS_SEMV: // Part 1
-		retVal = P1_V((P1_Semaphore)sysArgs->arg1);
+                if(validSem((int)sysArgs->arg1) == 0){
+                        sysArgs->arg4 = (void *) -1;
+                        return;
+                }
+		retVal = P1_V(userSemList[(int)sysArgs->arg1].sem);
 		if(retVal < 0){
 			sysArgs->arg4 = (void *) -1;
 		}
@@ -219,7 +244,12 @@ void sysHandler(int type,void *arg) {
 		}
 		break;
 	case SYS_SEMFREE: // Part 1
-		retVal = P1_SemFree((P1_Semaphore)sysArgs->arg1);
+                if(validSem((int)sysArgs->arg1) == 0){
+                        sysArgs->arg4 = (void *) -1;
+                        return;
+                }
+		
+		retVal = semDelete((int)sysArgs->arg1);
 		if(retVal < 0){
 			sysArgs->arg4 = (void *) -1;
 		}
@@ -340,6 +370,7 @@ int P2_Sleep(int seconds){
 			clockList[i].sem = s;
 			clockList[i].startTime = USLOSS_Clock();
 			clockList[i].waitingTime = seconds * US_IN_S;
+			break;
 		}
 	}
 	P1_V(clockListSemaphore);
@@ -528,21 +559,25 @@ static int ClockDriver(void *arg) {
 		 * Compute the current time and wake up any processes
 		 * whose time has come.
 		 */
-		P1_P(clockListSemaphore);
-		int i;
-		long now = USLOSS_Clock();
-		for(i = 0; i < P1_MAXPROC;i++){
-			if(clockList[i].inUse == 1){
-				if((now - clockList[i].startTime) >= clockList[i].waitingTime){
-					P1_V(clockList[i].sem);
-					clockList[i].inUse = 0;
-				}
-			}
-		}
-
-		P1_V(clockListSemaphore);
+		wakeUpProcesses();
 	}
+	wakeUpProcesses();
 	done: return rc;
+}
+
+void wakeUpProcesses(void){
+	P1_P(clockListSemaphore);
+        int i;
+       	long now = USLOSS_Clock();
+        for(i = 0; i < P1_MAXPROC;i++){
+        	if(clockList[i].inUse == 1){
+                	if((now - clockList[i].startTime) >= clockList[i].waitingTime){
+                       		P1_V(clockList[i].sem);
+                                clockList[i].inUse = 0;
+                        }
+                }
+        }
+        P1_V(clockListSemaphore);
 }
 
 void queueInsert(void *m,int size,message **head) {
@@ -587,4 +622,37 @@ static void interruptsOn(void) {
 
 static void userMode(void) {
 	USLOSS_PsrSet(USLOSS_PsrGet() & ~(USLOSS_PSR_CURRENT_MODE));
+}
+
+int semAdd(P1_Semaphore s){
+	int i;
+	P1_P(semGuard);
+	for(i = 0; i < P1_MAXSEM;i++){
+		if(userSemList[i].inUse == 0){
+			userSemList[i].inUse = 1;
+			userSemList[i].sem = s;
+			P1_V(semGuard);
+			return i;
+		}
+	}
+	P1_V(semGuard);
+	return -1;
+}
+
+int semDelete(int id){
+	P1_P(semGuard);
+	int ret = P1_SemFree(userSemList[id].sem);
+	userSemList[id].inUse = 0;
+	P1_V(semGuard);
+	return ret;
+}
+
+int validSem(int id){
+	P1_P(semGuard);
+	if(id < 0 || id >= P1_MAXSEM){
+		P1_V(semGuard);
+		return 0;
+	}
+	P1_V(semGuard);
+	return userSemList[id].inUse == 1;
 }
