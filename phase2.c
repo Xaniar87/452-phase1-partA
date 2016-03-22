@@ -127,7 +127,7 @@ int P2_Startup(void *arg) {
 	 * Join with the device drivers.
 	 */
 	// ...
-	USLOSS_Halt(0);
+	P2_Wait(&status);
 	return 0;
 }
 
