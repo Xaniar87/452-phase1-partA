@@ -27,7 +27,7 @@ int P3_Startup(void *notused)
 	USLOSS_Console("P3_Startup\n");
     	int result = Sys_Spawn("P4_Startup", P4_Startup, NULL, 4 *  USLOSS_MIN_STACK, 3, &pid);
 	printf("P3 pid changedi(P4 pid): %d\n", pid);
-	assert(result == 0);
+	Sys_Wait(&pid, &result);
 	Sys_DumpProcesses();
 	USLOSS_Console("P3_Finished\n");
 	return 0; 
@@ -37,7 +37,8 @@ int P4_Startup(void *notused) {
     	int pid;
 	USLOSS_Console("P4_Startup\n");
 	int result = Sys_Spawn("P5_Startup", P5_Startup, NULL, 4 *  USLOSS_MIN_STACK, 4, &pid);
-        printf("P4 pid changed: %d\n", pid);
+	Sys_Wait(&pid,&result);
+	printf("P4 pid changed: %d\n", pid);
     	USLOSS_Console("P4_Finished\n");
    	return 0;
 }
@@ -48,7 +49,8 @@ int P5_Startup(void *notused)
 	int pid;
     	USLOSS_Console("P5_Startup\n");
  	int result = Sys_Spawn("P6_Startup", P6_Startup, NULL, 4 *  USLOSS_MIN_STACK, 2, &pid);
-        printf("P5 pid changed: %d\n", pid);
+        Sys_Wait(&pid,&result);
+	printf("P5 pid changed: %d\n", pid);
 	Sys_DumpProcesses();
 	USLOSS_Console("P5_Finished\n");
    	return 0;
@@ -60,8 +62,8 @@ int P6_Startup(void *notused)
     int pid;
     USLOSS_Console("P6_Startup\n");
     int result = Sys_Spawn("P7_Startup", P7_Startup, NULL, 4 *  USLOSS_MIN_STACK, 5, &pid);
-    printf("P6 pid changed: %d\n", pid);
     assert(result == 0);
+    Sys_Wait(&pid,&result);
     int status = 4;
     Sys_Terminate(status);
     USLOSS_Console("P6_Finished\n");
