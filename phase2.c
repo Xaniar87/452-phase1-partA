@@ -81,6 +81,7 @@ P1_Semaphore clockListSemaphore;
 usem userSemList[P1_MAXSEM];
 P1_Semaphore semGuard;
 
+int done = 0;
 int P2_Startup(void *arg) {
 	USLOSS_IntVec[USLOSS_SYSCALL_INT] = sysHandler;
 	/*Init all mailboxes*/
@@ -137,14 +138,14 @@ int P2_Startup(void *arg) {
 	/*
 	 * Kill the device drivers
 	 */
-	P1_Kill(clockPID);
+	int a = P1_Kill(clockPID);
+	printf("%d\n",a);
 	// ...
 
 	/*
 	 * Join with the device drivers.
 	 */
 	// ...
-	P2_Wait(&status);
 	return 0;
 }
 
@@ -542,14 +543,17 @@ static int ClockDriver(void *arg) {
 	int status;
 	int rc = 0;
 	int myPID = P1_GetPID();
+	int state = 0;
 	/*
 	 * Let the parent know we are running and enable interrupts.
 	 */
 	P1_V(running);
 	while (1) {
-		if(P1_GetState(myPID) == 2){
+		state = P1_GetState(myPID);
+		if(state == 2 || state == 4){
 			goto done;
-		}	
+		}
+		printf("%d\n",P1_GetState(myPID));
 		result = P1_WaitDevice(USLOSS_CLOCK_DEV, 0, &status);
 		if (result != 0) {
 			rc = 1;
