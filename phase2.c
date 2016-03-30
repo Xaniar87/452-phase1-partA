@@ -81,6 +81,9 @@ P1_Semaphore clockListSemaphore;
 usem userSemList[P1_MAXSEM];
 P1_Semaphore semGuard;
 
+/*Semaphore for Disk*/
+P1_Semaphore diskDriverSemaphore;
+
 int done = 0;
 int P2_Startup(void *arg) {
 	USLOSS_IntVec[USLOSS_SYSCALL_INT] = sysHandler;
@@ -127,6 +130,10 @@ int P2_Startup(void *arg) {
 	/*
 	 * Create the other device drivers.
 	 */
+	/*
+	Create Disk Driver
+	*/
+	diskDriverSemaphore = P1_SemCreate(1); 
 	// ...
 	/*
 	 * Create initial user-level process. You'll need to check error codes, etc. P2_Spawn
@@ -157,6 +164,9 @@ void sysHandler(int type,void *arg) {
 	USLOSS_Sysargs *sysArgs = (USLOSS_Sysargs *) arg;
 	int retVal = 0;
 	int retVal2 = 0;
+	int *sector = 0;
+	int *track = 0;
+	int *disk = 0;
 	interruptsOn();
 	switch (sysArgs->number) {
 	case SYS_TERMREAD: 
@@ -194,8 +204,43 @@ void sysHandler(int type,void *arg) {
 		sysArgs->arg4 = (void *) retVal;
 		break;
 	case SYS_DISKREAD:
+		retVal = P2_DiskRead((int)sysArgs->arg5,(int)sysArgs->arg3,                                    (int) sysArgs->arg4,(int)sysArgs->arg2,(void *)sysArgs->arg1);
+                if (retVal == -1) {
+                        sysArgs->arg4 = (void *)-1;
+                        sysArgs->arg1 = (void *)-1;
+                }
+                else if (retVal == 0) {
+                        sysArgs->arg1 = (void *)0;
+                        sysArgs->arg4 = (void *)0;
+                }else {
+                        sysArgs->arg1 = (void *)retVal; //output is the disk's status register
+                        sysArgs->arg4 = (void *)0;
+                }
 		break;
 	case SYS_DISKWRITE:
+		retVal = P2_DiskWrite((int)sysArgs->arg5,(int)sysArgs->arg3,					(int) sysArgs->arg4,(int)sysArgs->arg2,(void *)sysArgs->arg1);
+		if (retVal == -1) {
+			sysArgs->arg4 = (void *)-1;
+			sysArgs->arg1 = (void *)-1;
+		}
+		else if (retVal == 0) {
+			sysArgs->arg1 = (void *)0;
+			sysArgs->arg4 = (void *)0;
+		}else {
+			sysArgs->arg1 = (void *)retVal; //output is the disk's status register
+			sysArgs->arg4 = (void *)0;
+		}
+		break;
+	case SYS_DISKSIZE:
+		retVal = P2_DiskSize((int)sysArgs->arg1,(int *)sector,(int *)track,(int *)disk);
+		if (retVal == -1) {
+			sysArgs->arg4 = (void *)-1;
+		}else {
+			sysArgs->arg1 = (void *)sector;
+			sysArgs->arg2 = (void *)track;
+			sysArgs->arg3 = (void *)disk;
+			sysArgs->arg4 = (void *)0;
+		}
 		break;
 	case SYS_GETTIMEOFDAY: //Part 1
 		sysArgs->arg1 = (void *)USLOSS_Clock();
@@ -582,6 +627,90 @@ void wakeUpProcesses(void){
                 }
         }
         P1_V(clockListSemaphore);
+}
+
+/*
+ *  This is the structure used to send a request to
+ *  a device.
+typedef struct USLOSS_DeviceRequest
+{
+    int opr;
+    void *reg1;
+    void *reg2;
+} USLOSS_DeviceRequest;
+*/
+
+// seek a 512 byte sector from the current track.
+int P2_DiskRead(int unit, int track, int first, int sectors, void *buffer) {
+	if(permissionCheck() || track < 0 || first < 0 
+	|| sectors < 1 || sectors > 15 || unit < 0){
+                return -1;
+        }	
+	P1_P(diskDriverSemaphore);
+	
+	//first make a device request struct for a seek
+	USLOSS_DeviceRequest *seekRequest = (USLOSS_DeviceRequest *)malloc(sizeof(USLOSS_DeviceRequest));
+	seekRequest->opr = USLOSS_DISK_SEEK;
+	seekRequest->reg1 = (void *) track; //track number where the r/w head should be moved
+	
+	//make device request struct for read
+	USLOSS_DeviceRequest *readRequest = (USLOSS_DeviceRequest *)malloc(sizeof(USLOSS_DeviceRequest));
+	readRequest->opr = USLOSS_DISK_READ; //type of request
+	readRequest->reg1 = (void *)first; //reg1 should contain the index of the sector to be read
+	readRequest->reg2 = buffer;
+	
+	//Now run the device requests
+	USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,seekRequest);
+	//there are 16 tracks (0 based) and we want to read #sectors on the track
+	while (first < 16 && sectors != 0) {
+		USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,readRequest);
+		first++;
+		readRequest->reg1 = (void *) first;
+		sectors--;
+	}
+	P1_V(diskDriverSemaphore);
+
+	return 0;
+}
+//write a 512 byte sector to the current track
+int P2_DiskWrite(int unit, int track, int first, int sectors, void *buffer) {
+	if(permissionCheck() || track < 0 || first < 0 || 
+	sectors < 1 || sectors > 15 || unit < 0){
+                return -1;
+        }
+	P1_P(diskDriverSemaphore);
+	 //first make a device request struct for a seek
+        USLOSS_DeviceRequest *seekRequest = (USLOSS_DeviceRequest *)malloc(sizeof(USLOSS_DeviceRequest));
+        seekRequest->opr = USLOSS_DISK_SEEK;
+        seekRequest->reg1 = (void *)track; //track number where the r/w head should be moved
+
+        //make device request struct for write
+        USLOSS_DeviceRequest *writeRequest = (USLOSS_DeviceRequest *)malloc(sizeof(USLOSS_DeviceRequest));
+        writeRequest->opr = USLOSS_DISK_WRITE; //type of request
+        writeRequest->reg1 = (void *)first; 
+	//reg1 should contain the index of the sector to write on
+        writeRequest->reg2 = buffer;
+
+        //Now run the device requests
+        USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,seekRequest);
+	while (first < 16 && sectors != 0) {
+        	USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,writeRequest);
+	 	first++;
+		writeRequest->reg1 = (void *)first;
+		sectors--;	
+	}
+	P1_V(diskDriverSemaphore);
+	return 0;
+}
+
+/*P2_DiskSize() returns info about the size of the disk indicated by unit*/
+int P2_DiskSize(int unit, int *sector, int *track, int *disk) {
+	if(permissionCheck() || unit < 0){
+                return -1;
+        }
+		
+
+	return 0;
 }
 
 void queueInsert(void *m,int size,message **head) {
