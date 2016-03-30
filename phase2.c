@@ -1,5 +1,5 @@
 /*
- 452 Phase 2 Part A
+ 452 Phase 2 Part B
  Authors:
  Matt Seall
  Zachary Nixon
@@ -54,6 +54,7 @@ typedef struct usem{
 
 /*Prototypes*/
 static int ClockDriver(void *arg);
+static int TermDriver(void *arg);
 static int launch(void *arg);
 static void queueInsert(void *m,int size,message **head);
 static message * queuePop(message **head);
@@ -84,6 +85,17 @@ P1_Semaphore semGuard;
 /*Semaphore for Disk*/
 P1_Semaphore diskDriverSemaphore;
 
+/*Term Driver PIDS*/
+int termPids[USLOSS_TERM_UNITS] = {0};
+
+/*Term mailbox ids*/
+int termMB[USLOSS_TERM_UNITS] = {0};
+
+/*Term semaphores - make sure only 1 term is being written / wrote at a time*/
+P1_Semaphore termSem[USLOSS_TERM_UNITS];
+
+P1_Semaphore running;
+
 int done = 0;
 int P2_Startup(void *arg) {
 	USLOSS_IntVec[USLOSS_SYSCALL_INT] = sysHandler;
@@ -109,7 +121,7 @@ int P2_Startup(void *arg) {
 	clockListSemaphore = P1_SemCreate(1);
 	semGuard = P1_SemCreate(1);
 
-	P1_Semaphore running;
+	running = P1_SemCreate(0);
 	int status;
 	int pid;
 	int clockPID;
@@ -117,7 +129,6 @@ int P2_Startup(void *arg) {
 	/*
 	 * Create clock device driver
 	 */
-	running = P1_SemCreate(0);
 	clockPID = P1_Fork("Clock driver", ClockDriver, (void *) running,
 	USLOSS_MIN_STACK, 2);
 	if (clockPID == -1) {
@@ -127,9 +138,13 @@ int P2_Startup(void *arg) {
 	 * Wait for the clock driver to start.
 	 */
 	P1_P(running);
-	/*
-	 * Create the other device drivers.
-	 */
+        for(i = 0; i < USLOSS_TERM_UNITS;i++){
+               	termPids[i] = P1_Fork("Term driver", TermDriver, (void *) i,USLOSS_MIN_STACK, 2);
+                int termMB[USLOSS_TERM_UNITS] = {0};if (termPids[i] == -1) {
+                        USLOSS_Console("Can't create term driver. Unit = %d\n",i);
+                }
+		P1_P(running);
+        }
 	/*
 	Create Disk Driver
 	*/
@@ -204,7 +219,7 @@ void sysHandler(int type,void *arg) {
 		sysArgs->arg4 = (void *) retVal;
 		break;
 	case SYS_DISKREAD:
-		retVal = P2_DiskRead((int)sysArgs->arg5,(int)sysArgs->arg3,                                    (int) sysArgs->arg4,(int)sysArgs->arg2,(void *)sysArgs->arg1);
+		retVal = P2_DiskRead((int)sysArgs->arg5,(int)sysArgs->arg3,(int) sysArgs->arg4,(int)sysArgs->arg2,(void *)sysArgs->arg1);
                 if (retVal == -1) {
                         sysArgs->arg4 = (void *)-1;
                         sysArgs->arg1 = (void *)-1;
@@ -218,7 +233,7 @@ void sysHandler(int type,void *arg) {
                 }
 		break;
 	case SYS_DISKWRITE:
-		retVal = P2_DiskWrite((int)sysArgs->arg5,(int)sysArgs->arg3,					(int) sysArgs->arg4,(int)sysArgs->arg2,(void *)sysArgs->arg1);
+		retVal = P2_DiskWrite((int)sysArgs->arg5,(int)sysArgs->arg3,(int) sysArgs->arg4,(int)sysArgs->arg2,(void *)sysArgs->arg1);
 		if (retVal == -1) {
 			sysArgs->arg4 = (void *)-1;
 			sysArgs->arg1 = (void *)-1;
@@ -583,22 +598,14 @@ int P2_MboxCondReceive(int mbox, void *msg, int *size){
 
 static int ClockDriver(void *arg) {
 	interruptsOn();
-	P1_Semaphore running = (P1_Semaphore) arg;
 	int result;
 	int status;
 	int rc = 0;
-	int myPID = P1_GetPID();
-	int state = 0;
 	/*
 	 * Let the parent know we are running and enable interrupts.
 	 */
 	P1_V(running);
 	while (1) {
-		state = P1_GetState(myPID);
-		if(state == 2 || state == 4){
-			goto done;
-		}
-		printf("%d\n",P1_GetState(myPID));
 		result = P1_WaitDevice(USLOSS_CLOCK_DEV, 0, &status);
 		if (result != 0) {
 			rc = 1;
@@ -612,6 +619,15 @@ static int ClockDriver(void *arg) {
 	}
 	wakeUpProcesses();
 	done: return rc;
+}
+
+static int TermDriver(void *arg){
+	int unit = (int) arg;
+	termMB[unit] = P2_MboxCreate(10, P2_MAX_LINE + 1); // Include new line 
+	termSem[unit] = P1_SemCreate(1);
+	
+	P1_V(running);
+	return unit;
 }
 
 void wakeUpProcesses(void){
