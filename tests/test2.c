@@ -20,7 +20,7 @@ int P3_Startup(void *arg) {
 	int bytes = 0;
 	Sys_Sleep(10);
 	Sys_Sleep(10);
-	while(1){
+	while(bytes == 0){
 		Sys_TermRead(buffer,200,1,&bytes);
 		USLOSS_Console("bytes = %d %s",bytes,buffer);
 	}
