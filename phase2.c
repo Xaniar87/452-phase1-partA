@@ -55,6 +55,7 @@ typedef struct usem{
 /*Prototypes*/
 static int ClockDriver(void *arg);
 static int TermDriver(void *arg);
+static int TermReader(void *arg);
 static int launch(void *arg);
 static void queueInsert(void *m,int size,message **head);
 static message * queuePop(message **head);
@@ -88,16 +89,21 @@ P1_Semaphore diskDriverSemaphore;
 /*Term Driver PIDS*/
 int termPids[USLOSS_TERM_UNITS] = {0};
 
-/*Term mailbox ids*/
-int termMB[USLOSS_TERM_UNITS] = {0};
+P1_Semaphore termRunningSem[USLOSS_TERM_UNITS];
 
-/*Term semaphores - make sure only 1 term is being written / wrote at a time*/
-P1_Semaphore termSem[USLOSS_TERM_UNITS];
+/*Term Reader Mailboxes*/
+int termReaderMB[USLOSS_TERM_UNITS] = {0};
+int termLookAhead[USLOSS_TERM_UNITS] = {0};
 
 P1_Semaphore running;
 
+int MAX_LINE = P2_MAX_LINE;
+int INT_SIZE = sizeof(int);
 int done = 0;
+
+
 int P2_Startup(void *arg) {
+	int status;
 	USLOSS_IntVec[USLOSS_SYSCALL_INT] = sysHandler;
 	/*Init all mailboxes*/
 	int i;
@@ -122,7 +128,6 @@ int P2_Startup(void *arg) {
 	semGuard = P1_SemCreate(1);
 
 	running = P1_SemCreate(0);
-	int status;
 	int pid;
 	int clockPID;
 
@@ -138,9 +143,9 @@ int P2_Startup(void *arg) {
 	 * Wait for the clock driver to start.
 	 */
 	P1_P(running);
-        for(i = 0; i < USLOSS_TERM_UNITS;i++){
+        for(i = 0; i < USLOSS_TERM_UNITS - 1;i++){
                	termPids[i] = P1_Fork("Term driver", TermDriver, (void *) i,USLOSS_MIN_STACK, 2);
-                int termMB[USLOSS_TERM_UNITS] = {0};if (termPids[i] == -1) {
+                if (termPids[i] == -1) {
                         USLOSS_Console("Can't create term driver. Unit = %d\n",i);
                 }
 		P1_P(running);
@@ -149,25 +154,22 @@ int P2_Startup(void *arg) {
 	Create Disk Driver
 	*/
 	diskDriverSemaphore = P1_SemCreate(1); 
-	// ...
-	/*
-	 * Create initial user-level process. You'll need to check error codes, etc. P2_Spawn
-	 * and P2_Wait are assumed to be the kernel-level functions that implement the Spawn and
-	 * Wait system calls, respectively (you can't invoke a system call from the kernel).
-	 */
 	pid = P2_Spawn("P3_Startup", P3_Startup, NULL, 4 * USLOSS_MIN_STACK, 3);
 	pid = P2_Wait(&status);
 	/*
 	 * Kill the device drivers
 	 */
-	int a = P1_Kill(clockPID);
-	printf("%d\n",a);
-	// ...
-
-	/*
-	 * Join with the device drivers.
-	 */
-	// ...
+	P1_Kill(clockPID);
+	done = 1;
+	int ctrl = 0;
+        ctrl = USLOSS_TERM_CTRL_XMIT_INT(ctrl);
+        ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+	for(i = 0 ; i < USLOSS_TERM_UNITS - 1;i++){
+		P1_Kill(termPids[i]);
+		USLOSS_DeviceOutput(USLOSS_TERM_DEV, i, (void *)ctrl);
+		P2_Wait(&status);
+	}
+	P2_Wait(&status);
 	return 0;
 }
 
@@ -184,7 +186,14 @@ void sysHandler(int type,void *arg) {
 	int *disk = 0;
 	interruptsOn();
 	switch (sysArgs->number) {
-	case SYS_TERMREAD: 
+	case SYS_TERMREAD:
+		retVal = P2_TermRead((int)sysArgs->arg3, (int)sysArgs->arg2, sysArgs->arg1);
+		if(retVal >= 0){
+			sysArgs->arg4 = (void *)0;
+			sysArgs->arg2 = (void *)retVal;
+		}else{
+			sysArgs->arg4 = (void *)-1;
+		}
 		break;
 	case SYS_TERMWRITE:
 		break;
@@ -596,7 +605,7 @@ int P2_MboxCondReceive(int mbox, void *msg, int *size){
 	return -2;
 }
 
-static int ClockDriver(void *arg) {
+int ClockDriver(void *arg) {
 	interruptsOn();
 	int result;
 	int status;
@@ -621,12 +630,60 @@ static int ClockDriver(void *arg) {
 	done: return rc;
 }
 
-static int TermDriver(void *arg){
+int TermDriver(void *arg){
 	int unit = (int) arg;
-	termMB[unit] = P2_MboxCreate(10, P2_MAX_LINE + 1); // Include new line 
-	termSem[unit] = P1_SemCreate(1);
-	
+	termReaderMB[unit] = P2_MboxCreate(1,INT_SIZE);
+	termLookAhead[unit] = P2_MboxCreate(10,MAX_LINE);
+	termRunningSem[unit] = P1_SemCreate(0);
+	P1_Fork("Term Reader", TermReader, (void *) unit,USLOSS_MIN_STACK, 2);
+	P1_P(termRunningSem[unit]);
+	/*Turn on Terminal interrupts*/
+	int ctrl = 0;
+	ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+	USLOSS_DeviceOutput(USLOSS_TERM_DEV,unit,(void *)ctrl);
 	P1_V(running);
+	int status = 0;
+	int result;
+	while(1){
+		result = P1_WaitDevice(USLOSS_TERM_DEV,unit,&status);
+		if(result != 0 || done != 0){
+			break;
+		}
+		if(USLOSS_TERM_STAT_RECV(status) == USLOSS_DEV_BUSY){
+			P2_MboxSend(termReaderMB[unit],&status,&INT_SIZE);
+		}
+	}
+	status = 0;
+	P2_MboxCondSend(termReaderMB[unit],&ctrl,&status);
+	P1_Join(&status);
+	return unit;
+}
+
+int TermReader(void *arg){
+	int unit = (int) arg;
+	char buffer[P2_MAX_LINE] = { 0 };
+	int i = 0;
+	int status;
+	P1_V(termRunningSem[unit]);
+	while(1){
+		P2_MboxReceive(termReaderMB[unit],&status,&INT_SIZE);
+		if(done != 0){
+			break;
+		}
+		char c = USLOSS_TERM_STAT_CHAR(status);
+		if(i < P2_MAX_LINE){
+			buffer[i] = c;
+			i++;
+		}
+		if(c == '\n'){
+			if(i > P2_MAX_LINE){
+				i = P2_MAX_LINE;
+			}
+			P2_MboxCondSend(termLookAhead[unit],buffer,&i);
+			i = 0;
+			memset(buffer,0,MAX_LINE);
+		}
+	}
 	return unit;
 }
 
@@ -757,7 +814,7 @@ message * queuePop(message **head) {
  0 == we are in kernel mode. continue.
  1 == we are not in kernel mode. error message.
  */
-static int permissionCheck(void) {
+int permissionCheck(void) {
 	if ((USLOSS_PsrGet() & 0x1) < 1) {
 		USLOSS_Console("Must be in Kernel mode to perform this request. Stopping requested operation\n");
 		return 1;
@@ -765,11 +822,11 @@ static int permissionCheck(void) {
 	return 0;
 }
 
-static void interruptsOn(void) {
+void interruptsOn(void) {
 	USLOSS_PsrSet(USLOSS_PsrGet() | USLOSS_PSR_CURRENT_INT);
 }
 
-static void userMode(void) {
+void userMode(void) {
 	USLOSS_PsrSet(USLOSS_PsrGet() & ~(USLOSS_PSR_CURRENT_MODE));
 }
 
@@ -804,4 +861,21 @@ int validSem(int id){
 	}
 	P1_V(semGuard);
 	return userSemList[id].inUse == 1;
+}
+
+int P2_TermRead(int unit, int size, char* buffer){
+	if(unit > USLOSS_TERM_UNITS || unit < 0 || size < 0){
+		return -1;
+	}
+	char buff[P2_MAX_LINE + 1] = { 0 };
+	int bytes = P2_MboxReceive(termLookAhead[unit],buff,&size);
+	if(size == bytes){
+		buff[size - 1] = '\0';
+		strcpy(buffer,buff);
+		return bytes;
+	}else{
+		buff[bytes] = '\0';
+		strcpy(buffer,buff);
+		return bytes + 1; //Message + NULL
+	}
 }
