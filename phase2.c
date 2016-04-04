@@ -91,11 +91,14 @@ P1_Semaphore diskSem[USLOSS_DISK_UNITS] = {0};
 /*Term Driver PIDS*/
 int termPids[USLOSS_TERM_UNITS] = {0};
 
+/* Term Semaphores */
 P1_Semaphore termRunningSem[USLOSS_TERM_UNITS];
+P1_Semaphore termWriteSem[USLOSS_TERM_UNITS];
 
-/*Term Reader Mailboxes*/
+/*Term Mailboxes*/
 int termReaderMB[USLOSS_TERM_UNITS] = {0};
 int termLookAhead[USLOSS_TERM_UNITS] = {0};
+int termCharToWrite[USLOSS_TERM_UNITS] = {0};
 
 P1_Semaphore running;
 
@@ -201,6 +204,13 @@ void sysHandler(int type,void *arg) {
                 }
                 break;
 	case SYS_TERMWRITE:
+		retVal = P2_TermWrite((int)sysArgs->arg3,(int)sysArgs->arg2,(char *)sysArgs->arg3);
+                if(retVal >= 0){
+                        sysArgs->arg4 = (void *)0;
+                        sysArgs->arg2 = (void *)retVal;
+                }else{
+                        sysArgs->arg4 = (void *)-1;
+                }
 		break;
 	case SYS_SPAWN: //Part 1
 		retVal = P2_Spawn(sysArgs->arg5, sysArgs->arg1, sysArgs->arg2,
@@ -656,15 +666,19 @@ int TermDriver(void *arg){
         int unit = (int) arg;
         termReaderMB[unit] = P2_MboxCreate(1,INT_SIZE);
         termLookAhead[unit] = P2_MboxCreate(10,MAX_LINE);
+	termCharToWrite[unit] = P2_MboxCreate(1,INT_SIZE);
+	termWriteSem[unit] = P1_SemCreate(1);
         termRunningSem[unit] = P1_SemCreate(0);
         P1_Fork("Term Reader", TermReader, (void *) unit,USLOSS_MIN_STACK, 2);
         P1_P(termRunningSem[unit]);
         /*Turn on Terminal interrupts*/
         int ctrl = 0;
+	int ctrl2 = 0;
         ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
         USLOSS_DeviceOutput(USLOSS_TERM_DEV,unit,(void *)ctrl);
         P1_V(running);
         int status = 0;
+	int c = 0;
         int result;
         while(1){
                 result = P1_WaitDevice(USLOSS_TERM_DEV,unit,&status);
@@ -674,6 +688,20 @@ int TermDriver(void *arg){
                 if(USLOSS_TERM_STAT_RECV(status) == USLOSS_DEV_BUSY){
                         P2_MboxSend(termReaderMB[unit],&status,&INT_SIZE);
                 }
+		if(USLOSS_TERM_STAT_XMIT(status) == USLOSS_DEV_READY){
+			if(P2_MboxCondReceive(termCharToWrite[unit],&c,&INT_SIZE) != -2){
+				ctrl2 = 0;
+				ctrl2 = USLOSS_TERM_CTRL_XMIT_INT(ctrl2);
+				ctrl2 = USLOSS_TERM_CTRL_RECV_INT(ctrl2);
+				ctrl2 = USLOSS_TERM_CTRL_CHAR(ctrl2, c);
+				ctrl2 = USLOSS_TERM_CTRL_XMIT_CHAR(ctrl2);
+				USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, (void *)ctrl2);
+			}else{
+				ctrl2 = 0;
+				ctrl2 = USLOSS_TERM_CTRL_RECV_INT(ctrl2);
+				USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, (void *)ctrl2);
+			}
+		}
         }
         status = 0;
         P2_MboxCondSend(termReaderMB[unit],&ctrl,&status);
@@ -708,7 +736,6 @@ int TermReader(void *arg){
         }
         return unit;
 }
-
 
 void wakeUpProcesses(void){
 	P1_P(clockListSemaphore);
@@ -924,5 +951,31 @@ int P2_TermRead(int unit, int size, char* buffer){
                 strcpy(buffer,buff);
                 return bytes + 1; //Message + NULL
         }
+}
+
+int P2_TermWrite(int unit, int size, char *text){
+        if(unit > USLOSS_TERM_UNITS || unit < 0 || size < 0){
+                return -1;
+        }
+	int ctrl = 0;
+	if(size > P2_MAX_LINE){
+		size = P2_MAX_LINE;
+	}
+	P1_P(termWriteSem[unit]);	
+	int i = 0;
+	int cSize = sizeof(char);
+	int c;
+	printf("size = %d\n",size);
+	while(i < size){
+		ctrl = USLOSS_TERM_CTRL_XMIT_INT(0);
+        	ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+        	USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, (void *)ctrl);
+		c = *(text + i);
+		printf("%c",c);
+		P2_MboxSend(termCharToWrite[unit],&c,&cSize);
+		i++;
+	}
+	P1_V(termWriteSem[unit]);
+	return size;
 }
 
