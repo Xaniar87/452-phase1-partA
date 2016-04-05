@@ -979,24 +979,21 @@ int validSem(int id){
 }
 
 int P2_TermRead(int unit, int size, char* buffer){
-        if(unit > USLOSS_TERM_UNITS || unit < 0 || size < 0){
+        if(unit >= USLOSS_TERM_UNITS || unit < 0 || size < 0){
                 return -1;
         }
-        char buff[P2_MAX_LINE + 1] = { 0 };
-        int bytes = P2_MboxReceive(termLookAhead[unit],buff,&size);
+        int bytes = P2_MboxReceive(termLookAhead[unit],buffer,&size);
         if(size == bytes){
-                buff[size - 1] = '\0';
-                strcpy(buffer,buff);
+                buffer[size - 1] = '\0';
                 return bytes;
         }else{
-                buff[bytes] = '\0';
-                strcpy(buffer,buff);
+                buffer[bytes] = '\0';
                 return bytes + 1; //Message + NULL
         }
 }
 
 int P2_TermWrite(int unit, int size, char *text){
-        if(unit > USLOSS_TERM_UNITS || unit < 0 || size < 0){
+        if(unit >= USLOSS_TERM_UNITS || unit < 0 || size < 0){
                 return -1;
         }
 	int ctrl = 0;
@@ -1007,13 +1004,11 @@ int P2_TermWrite(int unit, int size, char *text){
 	int i = 0;
 	int cSize = sizeof(char);
 	int c;
-	printf("size = %d\n",size);
 	while(i < size){
 		ctrl = USLOSS_TERM_CTRL_XMIT_INT(0);
         	ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
         	USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, (void *)ctrl);
 		c = *(text + i);
-		printf("%c",c);
 		P2_MboxSend(termCharToWrite[unit],&c,&cSize);
 		i++;
 	}
