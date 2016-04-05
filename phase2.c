@@ -159,10 +159,13 @@ int P2_Startup(void *arg) {
 	*/
 	for (i = 0; i < USLOSS_DISK_UNITS;i++) {
 		diskSem[i] = P1_SemCreate(1);
+		
 		diskPids[i] = P1_Fork("Disk driver", DiskDriver, (void *) i, USLOSS_MIN_STACK,2);
 		if (diskPids[i] == -1) {
 			USLOSS_Console("Cant create disk driver. Unit: %d\n",i);
 		}
+		P1_P(running);
+		
 	}
 	// Only two disk units, so fork processes for each unit, 0 & 1
 	pid = P2_Spawn("P3_Startup", P3_Startup, NULL, 4 * USLOSS_MIN_STACK, 3);
@@ -181,6 +184,17 @@ int P2_Startup(void *arg) {
                 USLOSS_DeviceOutput(USLOSS_TERM_DEV, i, (void *)ctrl);
                 P2_Wait(&status);
         }
+	//kill disk drivers
+	USLOSS_DeviceRequest *seekRequest = (USLOSS_DeviceRequest *)malloc(sizeof(USLOSS_DeviceRequest));
+        seekRequest->opr = USLOSS_DISK_SEEK;
+        seekRequest->reg1 = (void *)0;
+
+	for(i = 0 ; i < USLOSS_DISK_UNITS;i++){
+                P1_Kill(diskPids[i]);
+		USLOSS_DeviceOutput(USLOSS_DISK_DEV,i,seekRequest);
+                P2_Wait(&status);
+        }
+	
         P2_Wait(&status);
 	return 0;
 }
@@ -249,8 +263,8 @@ void sysHandler(int type,void *arg) {
 	case SYS_DISKREAD:
 		retVal = P2_DiskRead((int)sysArgs->arg5,(int)sysArgs->arg3,(int) sysArgs->arg4,(int)sysArgs->arg2,(void *)sysArgs->arg1);
                 if (retVal == -1) {
+                        sysArgs->arg1 = (void *)retVal;
                         sysArgs->arg4 = (void *)-1;
-                        sysArgs->arg1 = (void *)-1;
                 }
                 else if (retVal == 0) {
                         sysArgs->arg1 = (void *)0;
@@ -263,8 +277,8 @@ void sysHandler(int type,void *arg) {
 	case SYS_DISKWRITE:
 		retVal = P2_DiskWrite((int)sysArgs->arg5,(int)sysArgs->arg3,(int) sysArgs->arg4,(int)sysArgs->arg2,(void *)sysArgs->arg1);
 		if (retVal == -1) {
+			sysArgs->arg1 = (void *)retVal;
 			sysArgs->arg4 = (void *)-1;
-			sysArgs->arg1 = (void *)-1;
 		}
 		else if (retVal == 0) {
 			sysArgs->arg1 = (void *)0;
@@ -782,7 +796,7 @@ int P2_DiskRead(int unit, int track, int first, int sectors, void *buffer) {
                 return -1;
         }	
 	P1_P(diskSem[unit]);
-	int status = 0;
+	int status;
 	//first make a device request struct for a seek
 	USLOSS_DeviceRequest *seekRequest = (USLOSS_DeviceRequest *)malloc(sizeof(USLOSS_DeviceRequest));
 	seekRequest->opr = USLOSS_DISK_SEEK;
@@ -796,24 +810,29 @@ int P2_DiskRead(int unit, int track, int first, int sectors, void *buffer) {
 	
 	//Now run the device requests
 	USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,seekRequest);
-	USLOSS_DeviceInput(USLOSS_DISK_DEV,unit,&status); //status = 2 = ERROR
+	P1_WaitDevice(USLOSS_DISK_DEV,unit,&status);
 	//there are 16 tracks (0 based) and we want to read #sectors on the track
-	while (first < 16 && sectors != 0 && status != 2) {
+	while (first < 16 && sectors > 0 && status == 0) {
+		printf("running disk read requests\n");
 		USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,readRequest);
 		first++;
 		readRequest->reg1 = (void *) first;
 		sectors--;
-		USLOSS_DeviceInput(USLOSS_DISK_DEV,unit,&status); //status = 2 = ERROR
+		P1_WaitDevice(USLOSS_DISK_DEV,unit,&status);
 		if (status == 2) {
 			printf("Error with disk read request, unit %d, track %d, sector %d\n",unit, track, first);
 		}
+		if (first == 16 && sectors > 0) {
+			//need to move on to next track, do a seek request
+			track = track + 1;
+			seekRequest->reg1 = (void *) track;
+			USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,seekRequest);
+		        P1_WaitDevice(USLOSS_DISK_DEV,unit,&status);
+			first = 0; //set first to 0 sector of new track
+		}
 	}
 	P1_V(diskSem[unit]);
-	if (status != 0) {
-                return status; //return disk's status register
-        }else {
-                return 0;
-        }
+	return status;
 }
 //write a 512 byte sector to the current track
 int P2_DiskWrite(int unit, int track, int first, int sectors, void *buffer) {
@@ -837,25 +856,29 @@ int P2_DiskWrite(int unit, int track, int first, int sectors, void *buffer) {
 
         //Now run the device requests
         USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,seekRequest);
-	USLOSS_DeviceInput(USLOSS_DISK_DEV,unit,&status); //status = 2 = ERROR
-	while (first < 16 && sectors != 0 && status != 2)  {
-        	USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,writeRequest);
+	P1_WaitDevice(USLOSS_DISK_DEV,unit,&status);
+	while (first < 16 && sectors != 0 && status == 0)  {
+        	printf("running disk write requests\n");
+		USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,writeRequest);
 	 	first++;
 		writeRequest->reg1 = (void *)first;
 		sectors--;	
-		USLOSS_DeviceInput(USLOSS_DISK_DEV,unit,&status); 
+		P1_WaitDevice(USLOSS_DISK_DEV,unit,&status);
 		if (status == 2) {
                         printf("Error with disk write request, unit %d, track %d, sector %d\n",unit, track, first);
                 }
+		if (first == 16 && sectors > 0) {
+                        //need to move on to next track, do a seek request
+                        track = track + 1;
+                        seekRequest->reg1 = (void *) track;
+                        USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,seekRequest);
+                        P1_WaitDevice(USLOSS_DISK_DEV,unit,&status);
+                        first = 0; //set first to 0 sector of new track
+                }
 
 	}
-	
 	P1_V(diskSem[unit]);	
-	if (status != 0) {
-		return status; //return disk's status register, maybe return 2, not sure
-	}else {
-		return 0;
-	}
+	return status;
 }
 
 /*P2_DiskSize() returns info about the size of the disk indicated by unit*/
@@ -864,6 +887,7 @@ int P2_DiskSize(int unit, int *sector, int *track, int *disk) {
                 return -1;
         }
 	P1_P(diskSem[unit]);
+	int status;
 	sector = (int *)USLOSS_DISK_SECTOR_SIZE;
 	track = (int *)USLOSS_DISK_TRACK_SIZE;
 	// Make device request for finding number of tracks in disk
@@ -872,6 +896,7 @@ int P2_DiskSize(int unit, int *sector, int *track, int *disk) {
 	//reg1 contains pointer to integer where number of disk tracks will be stored
 	request->reg1 = &disk;
 	USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,request);
+	P1_WaitDevice(USLOSS_DISK_DEV,unit,&status);
 	P1_V(diskSem[unit]);
 	return 0;
 }
