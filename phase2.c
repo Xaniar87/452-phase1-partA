@@ -158,14 +158,18 @@ int P2_Startup(void *arg) {
 	Create Disk Driver
 	*/
 	for (i = 0; i < USLOSS_DISK_UNITS;i++) {
-		//diskSem[i] = P1_SemCreate(1);
-		//diskPids[i] = P1_Fork("Disk driver", DiskDriver, (void *) i, USLOSS_MIN_STACK,2);
+		diskSem[i] = P1_SemCreate(1);
+		diskPids[i] = P1_Fork("Disk driver", DiskDriver, (void *) i, USLOSS_MIN_STACK,2);
+		if (diskPids[i] == -1) {
+			USLOSS_Console("Cant create disk driver. Unit: %d\n",i);
+		}
 	}
 	// Only two disk units, so fork processes for each unit, 0 & 1
 	pid = P2_Spawn("P3_Startup", P3_Startup, NULL, 4 * USLOSS_MIN_STACK, 3);
 	pid = P2_Wait(&status);
 	/*
 	 * Kill the device drivers
+
 	 */
 	P1_Kill(clockPID);
         done = 1;
@@ -651,11 +655,19 @@ static int DiskDriver(void *arg) {
 	int status;
 	int result;
 	int rc = 0;
+	P1_V(running);
 	while(1) {
 		result = P1_WaitDevice(USLOSS_DISK_DEV,unit,&status);
 		if (result != 0) {
 			rc = 1;
 			break;
+		}
+		if (status == 0){ //Ready
+		
+		}else if (status == 1) { //Busy
+
+		}else { //status = 2, Error
+
 		}
 	}
 	return rc;
@@ -771,7 +783,6 @@ int P2_DiskRead(int unit, int track, int first, int sectors, void *buffer) {
         }	
 	P1_P(diskSem[unit]);
 	int status = 0;
-	int reg = 0; // disk's status register
 	//first make a device request struct for a seek
 	USLOSS_DeviceRequest *seekRequest = (USLOSS_DeviceRequest *)malloc(sizeof(USLOSS_DeviceRequest));
 	seekRequest->opr = USLOSS_DISK_SEEK;
@@ -793,10 +804,13 @@ int P2_DiskRead(int unit, int track, int first, int sectors, void *buffer) {
 		readRequest->reg1 = (void *) first;
 		sectors--;
 		USLOSS_DeviceInput(USLOSS_DISK_DEV,unit,&status); //status = 2 = ERROR
+		if (status == 2) {
+			printf("Error with disk read request, unit %d, track %d, sector %d\n",unit, track, first);
+		}
 	}
 	P1_V(diskSem[unit]);
-	if (status == 2) {
-                return reg; //return disk's status register
+	if (status != 0) {
+                return status; //return disk's status register
         }else {
                 return 0;
         }
@@ -809,7 +823,6 @@ int P2_DiskWrite(int unit, int track, int first, int sectors, void *buffer) {
         }
 	P1_P(diskSem[unit]);
 	int status = 0;
-	int reg = 0;	
 	 //first make a device request struct for a seek
         USLOSS_DeviceRequest *seekRequest = (USLOSS_DeviceRequest *)malloc(sizeof(USLOSS_DeviceRequest));
         seekRequest->opr = USLOSS_DISK_SEEK;
@@ -831,11 +844,15 @@ int P2_DiskWrite(int unit, int track, int first, int sectors, void *buffer) {
 		writeRequest->reg1 = (void *)first;
 		sectors--;	
 		USLOSS_DeviceInput(USLOSS_DISK_DEV,unit,&status); 
+		if (status == 2) {
+                        printf("Error with disk write request, unit %d, track %d, sector %d\n",unit, track, first);
+                }
+
 	}
 	
 	P1_V(diskSem[unit]);	
-	if (status == 2) {
-		return reg; //return disk's status register, maybe return 2, not sure
+	if (status != 0) {
+		return status; //return disk's status register, maybe return 2, not sure
 	}else {
 		return 0;
 	}
