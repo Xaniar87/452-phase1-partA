@@ -99,8 +99,13 @@ int termCharToWrite[USLOSS_TERM_UNITS] = {0};
 
 P1_Semaphore running;
 
+/*Constants used for mailboxes in Terminals drivers*/
 int MAX_LINE = P2_MAX_LINE;
 int INT_SIZE = sizeof(int);
+
+/*Constants used for disk operations*/
+int DISK_TRACKS[USLOSS_DISK_UNITS];
+
 int done = 0;
 
 int P2_Startup(void *arg) {
@@ -760,7 +765,7 @@ typedef struct USLOSS_DeviceRequest
 // seek a 512 byte sector from the current track.
 int P2_DiskRead(int unit, int track, int first, int sectors, void *buffer) {
         if(permissionCheck() || track < 0 || first < 0 ||
-        sectors < 1 || sectors > 15 || unit < 0 || unit > 1){
+        first > 15 || unit < 0 || unit > 1 || sectors <= 0){
                 return -1;
         }
         P1_P(diskSem[unit]);
@@ -805,7 +810,7 @@ int P2_DiskRead(int unit, int track, int first, int sectors, void *buffer) {
 //write a 512 byte sector to the current track
 int P2_DiskWrite(int unit, int track, int first, int sectors, void *buffer) {
 	if(permissionCheck() || track < 0 || first < 0 || 
-	sectors < 1 || sectors > 15 || unit < 0 || unit > 1){
+	first > 15 || unit < 0 || unit > 1 || sectors <= 0){
                 return -1;
         }
 	P1_P(diskSem[unit]);
@@ -827,7 +832,6 @@ int P2_DiskWrite(int unit, int track, int first, int sectors, void *buffer) {
 		writeRequest.reg2 = buffer + (i * USLOSS_DISK_SECTOR_SIZE);
 		USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,&writeRequest);
 		P1_WaitDevice(USLOSS_DISK_DEV,unit,&status);
-		printf("status = %d\n",status);
 		if (status == USLOSS_DEV_ERROR) {
                         USLOSS_Console("Error with disk write request, unit %d, track %d, sector %d\n",unit, track, first);
                 }
