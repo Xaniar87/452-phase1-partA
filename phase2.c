@@ -56,7 +56,6 @@ typedef struct usem{
 static int ClockDriver(void *arg);
 static int TermDriver(void *arg);
 static int TermReader(void *arg);
-static int DiskDriver(void *arg);
 static int launch(void *arg);
 static void queueInsert(void *m,int size,message **head);
 static message * queuePop(message **head);
@@ -84,8 +83,6 @@ P1_Semaphore clockListSemaphore;
 usem userSemList[P1_MAXSEM];
 P1_Semaphore semGuard;
 
-/*Semaphore and PIDS for Disk units*/
-int diskPids[USLOSS_DISK_UNITS] = {0};
 P1_Semaphore diskSem[USLOSS_DISK_UNITS] = {0};
 
 /*Term Driver PIDS*/
@@ -154,47 +151,43 @@ int P2_Startup(void *arg) {
                 }
                 P1_P(running);
         }
-	/*
-	Create Disk Driver
-	*/
+
 	for (i = 0; i < USLOSS_DISK_UNITS;i++) {
 		diskSem[i] = P1_SemCreate(1);
-		
-		diskPids[i] = P1_Fork("Disk driver", DiskDriver, (void *) i, USLOSS_MIN_STACK,2);
-		if (diskPids[i] == -1) {
-			USLOSS_Console("Cant create disk driver. Unit: %d\n",i);
-		}
-		P1_P(running);
-		
 	}
-	// Only two disk units, so fork processes for each unit, 0 & 1
+
 	pid = P2_Spawn("P3_Startup", P3_Startup, NULL, 4 * USLOSS_MIN_STACK, 3);
 	pid = P2_Wait(&status);
 	/*
 	 * Kill the device drivers
-
 	 */
+
 	P1_Kill(clockPID);
+	/*Let everyone know we are done.*/
         done = 1;
+
+	/*Interrupt all terminals*/
         int ctrl = 0;
         ctrl = USLOSS_TERM_CTRL_XMIT_INT(ctrl);
         ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+
         for(i = 0 ; i < USLOSS_TERM_UNITS - 1;i++){
                 P1_Kill(termPids[i]);
                 USLOSS_DeviceOutput(USLOSS_TERM_DEV, i, (void *)ctrl);
                 P2_Wait(&status);
         }
-	//kill disk drivers
-	USLOSS_DeviceRequest *seekRequest = (USLOSS_DeviceRequest *)malloc(sizeof(USLOSS_DeviceRequest));
-        seekRequest->opr = USLOSS_DISK_SEEK;
-        seekRequest->reg1 = (void *)0;
 
+	/*Interrupt any disk requests*/
+	USLOSS_DeviceRequest seekRequest;
+        seekRequest.opr = USLOSS_DISK_SEEK;
+        seekRequest.reg1 = (void *)0;
+	
 	for(i = 0 ; i < USLOSS_DISK_UNITS;i++){
-                P1_Kill(diskPids[i]);
-		USLOSS_DeviceOutput(USLOSS_DISK_DEV,i,seekRequest);
+		USLOSS_DeviceOutput(USLOSS_DISK_DEV,i,(void *)&seekRequest);
                 P2_Wait(&status);
         }
-	
+
+	/*Finally wait for the clock driver to be done*/	
         P2_Wait(&status);
 	return 0;
 }
@@ -207,9 +200,6 @@ void sysHandler(int type,void *arg) {
 	USLOSS_Sysargs *sysArgs = (USLOSS_Sysargs *) arg;
 	int retVal = 0;
 	int retVal2 = 0;
-	int *sector = 0;
-	int *track = 0;
-	int *disk = 0;
 	interruptsOn();
 	switch (sysArgs->number) {
 	case SYS_TERMREAD:
@@ -289,13 +279,10 @@ void sysHandler(int type,void *arg) {
 		}
 		break;
 	case SYS_DISKSIZE:
-		retVal = P2_DiskSize((int)sysArgs->arg1,(int *)sector,(int *)track,(int *)disk);
+		retVal = P2_DiskSize((int)sysArgs->arg1,(int *)sysArgs->arg1,(int *)sysArgs->arg2,(int *)sysArgs->arg3);
 		if (retVal == -1) {
 			sysArgs->arg4 = (void *)-1;
 		}else {
-			sysArgs->arg1 = (void *)sector;
-			sysArgs->arg2 = (void *)track;
-			sysArgs->arg3 = (void *)disk;
 			sysArgs->arg4 = (void *)0;
 		}
 		break;
@@ -663,31 +650,6 @@ static int ClockDriver(void *arg) {
 	done: return rc;
 }
 
-static int DiskDriver(void *arg) {
-        interruptsOn();
-        int unit = (int) arg;
-	int status;
-	int result;
-	int rc = 0;
-	P1_V(running);
-	while(1) {
-		result = P1_WaitDevice(USLOSS_DISK_DEV,unit,&status);
-		if (result != 0) {
-			rc = 1;
-			break;
-		}
-		if (status == 0){ //Ready
-		
-		}else if (status == 1) { //Busy
-
-		}else { //status = 2, Error
-
-		}
-	}
-	return rc;
-}
-
-
 int TermDriver(void *arg){
         int unit = (int) arg;
         termReaderMB[unit] = P2_MboxCreate(1,INT_SIZE);
@@ -791,49 +753,49 @@ typedef struct USLOSS_DeviceRequest
 
 // seek a 512 byte sector from the current track.
 int P2_DiskRead(int unit, int track, int first, int sectors, void *buffer) {
-	if(permissionCheck() || track < 0 || first < 0 
-	|| sectors < 1 || sectors > 15 || unit < 0 || unit > 1){
+        if(permissionCheck() || track < 0 || first < 0 ||
+        sectors < 1 || sectors > 15 || unit < 0 || unit > 1){
                 return -1;
-        }	
-	P1_P(diskSem[unit]);
-	int status;
-	//first make a device request struct for a seek
-	USLOSS_DeviceRequest *seekRequest = (USLOSS_DeviceRequest *)malloc(sizeof(USLOSS_DeviceRequest));
-	seekRequest->opr = USLOSS_DISK_SEEK;
-	seekRequest->reg1 = (void *) track; //track number where the r/w head should be moved
-	
-	//make device request struct for read
-	USLOSS_DeviceRequest *readRequest = (USLOSS_DeviceRequest *)malloc(sizeof(USLOSS_DeviceRequest));
-	readRequest->opr = USLOSS_DISK_READ; //type of request
-	readRequest->reg1 = (void *)first; //reg1 should contain the index of the sector to be read
-	readRequest->reg2 = buffer;
-	
-	//Now run the device requests
-	USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,seekRequest);
-	P1_WaitDevice(USLOSS_DISK_DEV,unit,&status);
-	//there are 16 tracks (0 based) and we want to read #sectors on the track
-	while (first < 16 && sectors > 0 && status == 0) {
-		printf("running disk read requests\n");
-		USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,readRequest);
-		first++;
-		readRequest->reg1 = (void *) first;
-		sectors--;
-		P1_WaitDevice(USLOSS_DISK_DEV,unit,&status);
-		if (status == 2) {
-			printf("Error with disk read request, unit %d, track %d, sector %d\n",unit, track, first);
-		}
-		if (first == 16 && sectors > 0) {
-			//need to move on to next track, do a seek request
-			track = track + 1;
-			seekRequest->reg1 = (void *) track;
-			USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,seekRequest);
-		        P1_WaitDevice(USLOSS_DISK_DEV,unit,&status);
-			first = 0; //set first to 0 sector of new track
-		}
-	}
-	P1_V(diskSem[unit]);
-	return status;
+        }
+        P1_P(diskSem[unit]);
+        int status = 0;
+         //first make a device request struct for a seek
+        USLOSS_DeviceRequest seekRequest;
+        seekRequest.opr = USLOSS_DISK_SEEK;
+        seekRequest.reg1 = (void *)track; //track number where the r/w head should be moved
+
+        //make device request struct for write
+        USLOSS_DeviceRequest readRequest;
+        readRequest.opr = USLOSS_DISK_READ;
+
+        USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,&seekRequest);
+        P1_WaitDevice(USLOSS_DISK_DEV,unit,&status);
+        int i = 0;
+        while (sectors != 0 && status == 0)  {
+                readRequest.reg1 = (void *)first;
+                readRequest.reg2 = buffer + (i * USLOSS_DISK_SECTOR_SIZE);
+                USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,&readRequest);
+                P1_WaitDevice(USLOSS_DISK_DEV,unit,&status);
+                if (status == USLOSS_DEV_ERROR) {
+                        USLOSS_Console("Error with disk read request, unit %d, track %d, sector %d\n",unit, track, first);
+                }
+                first++;
+                sectors--;
+                if (first == 16 && sectors > 0) {
+                        //need to move on to next track.
+                        track++;
+                        seekRequest.reg1 = (void *) track;
+                        USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,&seekRequest);
+                        P1_WaitDevice(USLOSS_DISK_DEV,unit,&status);
+                        first = 0; //set first to 0 sector of new track
+                }
+                readRequest.reg1 = (void *)first;
+                i++;
+        }
+        P1_V(diskSem[unit]);
+        return status;
 }
+
 //write a 512 byte sector to the current track
 int P2_DiskWrite(int unit, int track, int first, int sectors, void *buffer) {
 	if(permissionCheck() || track < 0 || first < 0 || 
@@ -843,39 +805,37 @@ int P2_DiskWrite(int unit, int track, int first, int sectors, void *buffer) {
 	P1_P(diskSem[unit]);
 	int status = 0;
 	 //first make a device request struct for a seek
-        USLOSS_DeviceRequest *seekRequest = (USLOSS_DeviceRequest *)malloc(sizeof(USLOSS_DeviceRequest));
-        seekRequest->opr = USLOSS_DISK_SEEK;
-        seekRequest->reg1 = (void *)track; //track number where the r/w head should be moved
+        USLOSS_DeviceRequest seekRequest;
+        seekRequest.opr = USLOSS_DISK_SEEK;
+        seekRequest.reg1 = (void *)track; //track number where the r/w head should be moved
 
         //make device request struct for write
-        USLOSS_DeviceRequest *writeRequest = (USLOSS_DeviceRequest *)malloc(sizeof(USLOSS_DeviceRequest));
-        writeRequest->opr = USLOSS_DISK_WRITE; //type of request
-        writeRequest->reg1 = (void *)first; 
-	//reg1 should contain the index of the sector to write on
-        writeRequest->reg2 = buffer;
+        USLOSS_DeviceRequest writeRequest;
+        writeRequest.opr = USLOSS_DISK_WRITE;
 
-        //Now run the device requests
-        USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,seekRequest);
+        USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,&seekRequest);
 	P1_WaitDevice(USLOSS_DISK_DEV,unit,&status);
-	while (first < 16 && sectors != 0 && status == 0)  {
-        	printf("running disk write requests\n");
-		USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,writeRequest);
-	 	first++;
-		writeRequest->reg1 = (void *)first;
-		sectors--;	
+	int i = 0;
+	while (sectors != 0 && status == 0)  {
+		writeRequest.reg1 = (void *)first;
+		writeRequest.reg2 = buffer + (i * USLOSS_DISK_SECTOR_SIZE);
+		USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,&writeRequest);
 		P1_WaitDevice(USLOSS_DISK_DEV,unit,&status);
-		if (status == 2) {
-                        printf("Error with disk write request, unit %d, track %d, sector %d\n",unit, track, first);
+		if (status == USLOSS_DEV_ERROR) {
+                        USLOSS_Console("Error with disk write request, unit %d, track %d, sector %d\n",unit, track, first);
                 }
+                first++;
+                sectors--;
 		if (first == 16 && sectors > 0) {
-                        //need to move on to next track, do a seek request
-                        track = track + 1;
-                        seekRequest->reg1 = (void *) track;
-                        USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,seekRequest);
+                        //need to move on to next track.
+                        track++;
+                        seekRequest.reg1 = (void *) track;
+                        USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,&seekRequest);
                         P1_WaitDevice(USLOSS_DISK_DEV,unit,&status);
                         first = 0; //set first to 0 sector of new track
                 }
-
+		writeRequest.reg1 = (void *)first;
+		i++;
 	}
 	P1_V(diskSem[unit]);	
 	return status;
@@ -891,11 +851,11 @@ int P2_DiskSize(int unit, int *sector, int *track, int *disk) {
 	sector = (int *)USLOSS_DISK_SECTOR_SIZE;
 	track = (int *)USLOSS_DISK_TRACK_SIZE;
 	// Make device request for finding number of tracks in disk
-	USLOSS_DeviceRequest *request = (USLOSS_DeviceRequest *)malloc(sizeof(USLOSS_DeviceRequest));
- 	request->opr = USLOSS_DISK_TRACKS;
+	USLOSS_DeviceRequest request;
+ 	request.opr = USLOSS_DISK_TRACKS;
 	//reg1 contains pointer to integer where number of disk tracks will be stored
-	request->reg1 = &disk;
-	USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,request);
+	request.reg1 = disk;
+	USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,&request);
 	P1_WaitDevice(USLOSS_DISK_DEV,unit,&status);
 	P1_V(diskSem[unit]);
 	return 0;
@@ -1013,6 +973,7 @@ int P2_TermWrite(int unit, int size, char *text){
 		i++;
 	}
 	P1_V(termWriteSem[unit]);
+	P2_Sleep(1);
 	return size;
 }
 
