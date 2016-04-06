@@ -200,6 +200,9 @@ void sysHandler(int type,void *arg) {
 	USLOSS_Sysargs *sysArgs = (USLOSS_Sysargs *) arg;
 	int retVal = 0;
 	int retVal2 = 0;
+	int sectSize = 0;
+	int sectors = 0;
+	int tracks = 0;
 	interruptsOn();
 	switch (sysArgs->number) {
 	case SYS_TERMREAD:
@@ -279,11 +282,14 @@ void sysHandler(int type,void *arg) {
 		}
 		break;
 	case SYS_DISKSIZE:
-		retVal = P2_DiskSize((int)sysArgs->arg1,(int *)sysArgs->arg1,(int *)sysArgs->arg2,(int *)sysArgs->arg3);
+		retVal = P2_DiskSize((int)sysArgs->arg1,&sectSize,&sectors,&tracks);
 		if (retVal == -1) {
 			sysArgs->arg4 = (void *)-1;
 		}else {
 			sysArgs->arg4 = (void *)0;
+			sysArgs->arg1 = (void *)sectSize;
+			sysArgs->arg2 = (void *)sectors;
+			sysArgs->arg3 = (void *)tracks;
 		}
 		break;
 	case SYS_GETTIMEOFDAY: //Part 1
@@ -821,6 +827,7 @@ int P2_DiskWrite(int unit, int track, int first, int sectors, void *buffer) {
 		writeRequest.reg2 = buffer + (i * USLOSS_DISK_SECTOR_SIZE);
 		USLOSS_DeviceOutput(USLOSS_DISK_DEV,unit,&writeRequest);
 		P1_WaitDevice(USLOSS_DISK_DEV,unit,&status);
+		printf("status = %d\n",status);
 		if (status == USLOSS_DEV_ERROR) {
                         USLOSS_Console("Error with disk write request, unit %d, track %d, sector %d\n",unit, track, first);
                 }
@@ -848,8 +855,8 @@ int P2_DiskSize(int unit, int *sector, int *track, int *disk) {
         }
 	P1_P(diskSem[unit]);
 	int status;
-	sector = (int *)USLOSS_DISK_SECTOR_SIZE;
-	track = (int *)USLOSS_DISK_TRACK_SIZE;
+	*sector = USLOSS_DISK_SECTOR_SIZE;
+	*track = USLOSS_DISK_TRACK_SIZE;
 	// Make device request for finding number of tracks in disk
 	USLOSS_DeviceRequest request;
  	request.opr = USLOSS_DISK_TRACKS;
