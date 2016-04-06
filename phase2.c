@@ -149,7 +149,7 @@ int P2_Startup(void *arg) {
 	 * Wait for the clock driver to start.
 	 */
 	P1_P(running);
-        for(i = 0; i < USLOSS_TERM_UNITS - 1;i++){
+        for(i = 0; i < USLOSS_TERM_UNITS;i++){
                 termPids[i] = P1_Fork("Term driver", TermDriver, (void *) i,USLOSS_MIN_STACK, 2);
                 if (termPids[i] == -1) {
                         USLOSS_Console("Can't create term driver. Unit = %d\n",i);
@@ -176,7 +176,7 @@ int P2_Startup(void *arg) {
         ctrl = USLOSS_TERM_CTRL_XMIT_INT(ctrl);
         ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
 
-        for(i = 0 ; i < USLOSS_TERM_UNITS - 1;i++){
+        for(i = 0 ; i < USLOSS_TERM_UNITS;i++){
                 P1_Kill(termPids[i]);
                 USLOSS_DeviceOutput(USLOSS_TERM_DEV, i, (void *)ctrl);
                 P2_Wait(&status);
@@ -220,7 +220,7 @@ void sysHandler(int type,void *arg) {
                 }
                 break;
 	case SYS_TERMWRITE:
-		retVal = P2_TermWrite((int)sysArgs->arg3,(int)sysArgs->arg2,(char *)sysArgs->arg3);
+		retVal = P2_TermWrite((int)sysArgs->arg3,(int)sysArgs->arg2,(char *)sysArgs->arg1);
                 if(retVal >= 0){
                         sysArgs->arg4 = (void *)0;
                         sysArgs->arg2 = (void *)retVal;
