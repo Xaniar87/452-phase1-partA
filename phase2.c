@@ -156,9 +156,11 @@ int P2_Startup(void *arg) {
                 }
                 P1_P(running);
         }
-
+	int sector,track,disk;
 	for (i = 0; i < USLOSS_DISK_UNITS;i++) {
 		diskSem[i] = P1_SemCreate(1);
+		P2_DiskSize(i,&sector,&track,&disk);
+		DISK_TRACKS[i] = disk;
 	}
 
 	pid = P2_Spawn("P3_Startup", P3_Startup, NULL, 4 * USLOSS_MIN_STACK, 3);
@@ -764,7 +766,7 @@ typedef struct USLOSS_DeviceRequest
 
 // seek a 512 byte sector from the current track.
 int P2_DiskRead(int unit, int track, int first, int sectors, void *buffer) {
-        if(permissionCheck() || track < 0 || first < 0 ||
+        if(permissionCheck() || track < 0 || track >= DISK_TRACKS[unit] || first < 0 ||
         first > 15 || unit < 0 || unit > 1 || sectors <= 0){
                 return -1;
         }
@@ -809,7 +811,7 @@ int P2_DiskRead(int unit, int track, int first, int sectors, void *buffer) {
 
 //write a 512 byte sector to the current track
 int P2_DiskWrite(int unit, int track, int first, int sectors, void *buffer) {
-	if(permissionCheck() || track < 0 || first < 0 || 
+	if(permissionCheck() || track < 0 || track >= DISK_TRACKS[unit] || first < 0 || 
 	first > 15 || unit < 0 || unit > 1 || sectors <= 0){
                 return -1;
         }
