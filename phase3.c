@@ -8,6 +8,7 @@
 #include <assert.h>
 #include <phase3.h>
 #include <string.h>
+#include <libuser.h>
 
 /*
  * Everybody uses the same tag.
@@ -51,20 +52,35 @@ typedef struct Fault {
 	int mbox; /* Where to send reply. */
 /* Add more stuff here if necessary. */
 } Fault;
+int FAULT_SIZE = sizeof(Fault);
 
 static void *vmRegion = NULL;
 
 P3_VmStats P3_vmStats;
 
 static int pagerMbox = -1;
+static P1_Semaphore pagerRunning;
+static int numbPagers = -1;
 
 static void CheckPid(int);
 static void CheckMode(void);
+static int CheckInit(void);
 static void FaultHandler(int type, void *arg);
+static int Pager(void *arg);
 
 void P3_Fork(int pid);
 void P3_Switch(int old, int new);
 void P3_Quit(int pid);
+
+static int done = 0;
+
+int P3_Startup(void *arg){
+	int pid;
+	Sys_Spawn("P4_Startup", P4_Startup, NULL, 4 * USLOSS_MIN_STACK, 3,&pid);	
+	int status;
+	Sys_Wait(&pid,&status);
+	return 0;
+}
 
 /*
  *----------------------------------------------------------------------
@@ -88,6 +104,14 @@ int P3_VmInit(int mappings, int pages, int frames, int pagers) {
 	int tmp;
 
 	CheckMode();
+	if(mappings != pages){
+		return -1;
+	}
+	
+	if(!CheckInit()){
+		return -2;
+	}
+	
 	status = USLOSS_MmuInit(mappings, pages, frames);
 	if (status != USLOSS_MMU_OK) {
 		USLOSS_Console("P3_VmInit: couldn't initialize MMU, status %d\n",
@@ -105,7 +129,15 @@ int P3_VmInit(int mappings, int pages, int frames, int pagers) {
 	/*
 	 * Create the page fault mailbox and fork the pagers here.
 	 */
+	pagerMbox = P2_MboxCreate(P1_MAXPROC,sizeof(Fault));
+        pagerRunning = P1_SemCreate(0);
+	numbPagers = pagers;
 
+	int j;
+	for(i = 0; i < pagers; i++){
+		Sys_Spawn("Pager",Pager,NULL,USLOSS_MIN_STACK,P3_PAGER_PRIORITY,&j);
+		Sys_SemP(pagerRunning);
+	}
 	memset((char *) &P3_vmStats, 0, sizeof(P3_VmStats));
 	P3_vmStats.pages = pages;
 	P3_vmStats.frames = frames;
@@ -130,10 +162,22 @@ int P3_VmInit(int mappings, int pages, int frames, int pagers) {
  */
 void P3_VmDestroy(void) {
 	CheckMode();
+	if(CheckInit()){
+		return;
+	}
 	USLOSS_MmuDone();
 	/*
 	 * Kill the pagers here.
 	 */
+	done = 1;
+	int i;
+	int status;
+	int pid;
+	Fault f;
+	for(i = 0; i < P3_MAX_PAGERS;i++){
+		Sys_MboxCondSend(pagerMbox,&f,&FAULT_SIZE);
+		Sys_Wait(&pid,&status);
+	}
 	/*
 	 * Print vm statistics.
 	 */
@@ -141,7 +185,14 @@ void P3_VmDestroy(void) {
 	USLOSS_Console("pages: %d\n", P3_vmStats.pages);
 	USLOSS_Console("frames: %d\n", P3_vmStats.frames);
 	USLOSS_Console("blocks: %d\n", P3_vmStats.blocks);
-	/* and so on... */
+	USLOSS_Console("freeFrames: %d\n",P3_vmStats.freeFrames);
+	USLOSS_Console("freeBlocks: %d\n",P3_vmStats.freeBlocks);
+	USLOSS_Console("switches: %d\n",P3_vmStats.switches);
+	USLOSS_Console("faults: %d\n",P3_vmStats.faults);
+	USLOSS_Console("new: %d\n",P3_vmStats.new);
+	USLOSS_Console("pageIns: %d\n",P3_vmStats.pageIns);
+	USLOSS_Console("pageOuts: %d\n",P3_vmStats.pageOuts);
+	USLOSS_Console("replcaed: %d\n",P3_vmStats.replaced);
 }
 
 /*
@@ -166,6 +217,9 @@ void P3_Fork(pid)
 
 	CheckMode();
 	CheckPid(pid);
+	if(CheckInit()){
+		return;
+	}
 	processes[pid].numPages = numPages;
 	processes[pid].pageTable = (PTE *) malloc(sizeof(PTE) * numPages);
 	for (i = 0; i < numPages; i++) {
@@ -196,6 +250,9 @@ void P3_Quit(pid)
 	int pid; {
 	CheckMode();
 	CheckPid(pid);
+        if(CheckInit()){
+                return;
+        }
 	assert(processes[pid].numPages > 0);
 	assert(processes[pid].pageTable != NULL);
 
@@ -231,6 +288,9 @@ void P3_Switch(old, new)
 	int old; /* Old (current) process */
 	int new; /* New process */
 {
+        if(CheckInit()){
+                return;
+        }
 	int page;
 	int status;
 
@@ -327,8 +387,13 @@ static void FaultHandler(type, arg)
  *
  *----------------------------------------------------------------------
  */
-static int Pager(void) {
+int Pager(void *arg) {
+	Fault f;
 	while (1) {
+		Sys_MboxReceive(pagerMbox,&f,&FAULT_SIZE);
+		if(done == 1){
+			break;
+		}
 		/* Wait for fault to occur (receive from pagerMbox) */
 		/* Find a free frame */
 		/* If there isn't one run clock algorithm, write page to disk if necessary */
@@ -355,4 +420,8 @@ static void CheckMode(void) {
 		USLOSS_Console("Invoking protected routine from user mode\n");
 		USLOSS_Halt(1);
 	}
+}
+
+static int CheckInit(void){
+	return !(pagerMbox == -1);
 }
