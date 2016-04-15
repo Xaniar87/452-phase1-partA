@@ -177,7 +177,6 @@ int P3_VmInit(int mappings, int pages, int frames, int pagers) {
 	P2_DiskSize(SWAP_DISK_NUM,&sector,&numSectors,&tracks);	
 	ModifyStats(FBLOCKS,(sector * numSectors * tracks) / USLOSS_MmuPageSize());
 	ModifyStats(BLOCKS,(sector * numSectors * tracks) / USLOSS_MmuPageSize());
-	//ModifyStats(BLOCKS,USLOSS_MmuPageSize());
 	numPages = pages;
 	numFrames = frames;
 	return 0;
@@ -347,7 +346,7 @@ void P3_Switch(int old, int new)
 	CheckPid(new);
 
 	if(CheckInit() == VMOFF){
-		return
+		return;
 	}
 
 	ModifyStats(SWITCHES,1);
@@ -436,10 +435,13 @@ int Pager(void *arg) {
 	Fault f;
 	P1_V(pagerRunning);
 	int i;
+	int size = 0;
 	int newFrame;
 	int status;
+	int startPage;
 	void *startVM = USLOSS_MmuRegion(&status);
 	int pageSize = USLOSS_MmuPageSize();
+	int page;
 	while (1) {
 		P2_MboxReceive(pagerMbox,&f,&FAULT_SIZE);
 		if(done == 1){
@@ -448,19 +450,34 @@ int Pager(void *arg) {
 		/* Find a free frame */
 		P1_P(FLSem);
 		newFrame = -1;
+		page = ((long)f.addr - (long)startVM) / pageSize;
 		for(i = 0 ; i < numFrames; i++){
 			if(frameList[i] == UNUSED){
+				/*Indicate this frame is now in use.*/
 				ModifyStats(FFRAMES,-1);
 				newFrame = i;
 				frameList[i] = INCORE;
-				status = USLOSS_MmuMap(TAG, page);
+				/*Loading this mapping to the pagers MMU mapping.*/
+				status = USLOSS_MmuMap(TAG, page,newFrame,USLOSS_MMU_PROT_RW);
+				if(status != USLOSS_MMU_OK){
+					USLOSS_Console("Unable to map.\n");
+					USLOSS_Halt(1);			
+				}
+				/*Zero this frame.*/
+				startPage = (long) startVM + (page * pageSize);
+				memset((void *)startPage,0,pageSize);
+				status = USLOSS_MmuUnmap(TAG, page);
+                                if(status != USLOSS_MMU_OK){
+                                        USLOSS_Console("Unable to un-map.\n");
+                                        USLOSS_Halt(1);
+                                }
+				break;
 			}
 		}
 		P1_V(FLSem);
-		//USLOSS_MmuPageSize()
 		/* If there isn't one run clock algorithm, write page to disk if necessary */
-		/* Load page into frame from disk or fill with zeros */
 		/* Unblock waiting (faulting) process */
+		P2_MboxSend(f.mbox, NULL, &size);
 	}
 	/* Never gets here. */
 	return 1;
