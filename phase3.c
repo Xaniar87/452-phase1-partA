@@ -103,6 +103,9 @@ int P3_Startup(void *arg){
 	int pid;
 	Sys_Spawn("P4_Startup", P4_Startup, NULL, 4 * USLOSS_MIN_STACK, 3,&pid);	
 	Sys_Wait(&pid,&status);
+	if(CheckInit() == VMON){
+		Sys_VmDestroy();
+	}
 	return 0;
 }
 
@@ -123,6 +126,8 @@ int P3_Startup(void *arg){
  *----------------------------------------------------------------------
  */
 int P3_VmInit(int mappings, int pages, int frames, int pagers) {
+	/*PART A ALWAYS HAVE 1 PAGER.*/
+	pagers = 1;
 	int status;
 	int i;
 	int tmp;
@@ -134,7 +139,7 @@ int P3_VmInit(int mappings, int pages, int frames, int pagers) {
 	
 	if(CheckInit() == VMON){
 		return -2;
-	}	
+	}
 	status = USLOSS_MmuInit(mappings, pages, frames);
 	if (status != USLOSS_MMU_OK) {
 		USLOSS_Console("P3_VmInit: couldn't initialize MMU, status %d\n",
@@ -230,7 +235,7 @@ void P3_VmDestroy(void) {
 	USLOSS_Console("new: %d\n",P3_vmStats.new);
 	USLOSS_Console("pageIns: %d\n",P3_vmStats.pageIns);
 	USLOSS_Console("pageOuts: %d\n",P3_vmStats.pageOuts);
-	USLOSS_Console("replcaed: %d\n",P3_vmStats.replaced);
+	USLOSS_Console("replaced: %d\n",P3_vmStats.replaced);
 	P1_V(vmStatsSem);
 }
 
@@ -395,9 +400,7 @@ void P3_Switch(int old, int new)
  *
  *----------------------------------------------------------------------
  */
-static void FaultHandler(type, arg)
-	int type; /* USLOSS_MMU_INT */
-	void *arg; /* Address that caused the fault */
+static void FaultHandler(int type,void *arg)
 {
 	int cause;
 	int status;
@@ -450,7 +453,8 @@ int Pager(void *arg) {
 		/* Find a free frame */
 		P1_P(FLSem);
 		newFrame = -1;
-		page = ((long)f.addr - (long)startVM) / pageSize;
+		page = (int)f.addr / (int)pageSize;
+		USLOSS_Console("Page = %d\n",page);
 		for(i = 0 ; i < numFrames; i++){
 			if(frameList[i] == UNUSED){
 				/*Indicate this frame is now in use.*/
@@ -458,9 +462,10 @@ int Pager(void *arg) {
 				newFrame = i;
 				frameList[i] = INCORE;
 				/*Loading this mapping to the pagers MMU mapping.*/
+				//status = USLOSS_MmuMap(TAG, page,newFrame,USLOSS_MMU_PROT_RW);
 				status = USLOSS_MmuMap(TAG, page,newFrame,USLOSS_MMU_PROT_RW);
 				if(status != USLOSS_MMU_OK){
-					USLOSS_Console("Unable to map.\n");
+					USLOSS_Console("Unable to map. status = %d\n",status);
 					USLOSS_Halt(1);			
 				}
 				/*Zero this frame.*/
@@ -468,9 +473,12 @@ int Pager(void *arg) {
 				memset((void *)startPage,0,pageSize);
 				status = USLOSS_MmuUnmap(TAG, page);
                                 if(status != USLOSS_MMU_OK){
-                                        USLOSS_Console("Unable to un-map.\n");
+                                        USLOSS_Console("Unable to un-map. status = %d\n",status);
                                         USLOSS_Halt(1);
                                 }
+				/*Add this frame <--> page mapping to process page table*/
+				processes[f.pid].pageTable[page].frame = newFrame;
+				processes[f.pid].pageTable[page].state = INCORE;	
 				break;
 			}
 		}
