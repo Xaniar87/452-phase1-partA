@@ -218,7 +218,9 @@ void P3_VmDestroy(void) {
 		P2_MboxCondSend(pagerMbox,&f,&FAULT_SIZE);
 		P1_Join(&status);
 	}
-
+	
+	P2_MboxRelease(pagerMbox);
+	pagerMbox = -1;
 	free(frameList);
 	/*
 	 * Print vm statistics.
