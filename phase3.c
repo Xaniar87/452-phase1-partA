@@ -76,13 +76,13 @@ typedef struct Fault {
 } Fault;
 int FAULT_SIZE = sizeof(Fault);
 
-static void *vmRegion = NULL;
 
 P3_VmStats P3_vmStats;
 static P1_Semaphore vmStatsSem;
 
 static int pagerMbox = -1;
 static P1_Semaphore pagerRunning;
+static P1_Semaphore pagerDone;
 static int numPagers = -1;
 
 static void CheckPid(int);
@@ -103,9 +103,6 @@ int P3_Startup(void *arg){
 	int pid;
 	Sys_Spawn("P4_Startup", P4_Startup, NULL, 4 * USLOSS_MIN_STACK, 3,&pid);	
 	Sys_Wait(&pid,&status);
-	if(CheckInit() == VMON){
-		Sys_VmDestroy();
-	}
 	return 0;
 }
 
@@ -130,8 +127,6 @@ int P3_VmInit(int mappings, int pages, int frames, int pagers) {
 	pagers = 1;
 	int status;
 	int i;
-	int tmp;
-
 	CheckMode();
 	if(mappings != pages){
 		return -1;
@@ -146,33 +141,31 @@ int P3_VmInit(int mappings, int pages, int frames, int pagers) {
 				status);
 		USLOSS_Halt(1);
 	}
-	vmRegion = USLOSS_MmuRegion(&tmp);
 	USLOSS_IntVec[USLOSS_MMU_INT] = FaultHandler;
 	for (i = 0; i < P1_MAXPROC; i++) {
 		processes[i].numPages = 0;
 		processes[i].pageTable = NULL;
 	}
+	pagerMbox = P2_MboxCreate(P1_MAXPROC,sizeof(Fault));
 	/*
 	 * Create the page fault mailbox and fork the pagers here.
-	 */
+	*/	 
 	pagerMbox = P2_MboxCreate(P1_MAXPROC,sizeof(Fault));
         pagerRunning = P1_SemCreate(0);
+	pagerDone = P1_SemCreate(0);
 	numPagers = pagers;
 	done = 0;
 	vmStatsSem = P1_SemCreate(1);
 	FLSem = P1_SemCreate(1);
-
 	frameList = malloc(sizeof(int) * frames);	
 	for(i = 0; i < frames;i++){
 		frameList[i] = UNUSED;
 	}
-
 	for(i = 0; i < pagers; i++){
-		P1_Fork("Pager",Pager,NULL,USLOSS_MIN_STACK,P3_PAGER_PRIORITY);
+		P1_Fork("Pager",Pager,NULL,USLOSS_MIN_STACK * 3,P3_PAGER_PRIORITY);
 		P1_P(pagerRunning);
 	}
-
-	memset((char *) &P3_vmStats, 0, sizeof(P3_VmStats));
+	memset(&P3_vmStats, 0, sizeof(P3_VmStats));
 	ModifyStats(PAGES,pages);
 	ModifyStats(FRAMES,frames);
 	ModifyStats(FFRAMES,frames);
@@ -209,22 +202,21 @@ void P3_VmDestroy(void) {
 	USLOSS_MmuDone();
 	/*
 	 * Kill the pagers here.
-	 */
+	*/ 
 	done = 1;
 	int i;
-	int status;
 	Fault f;
 	for(i = 0; i < numPagers;i++){
 		P2_MboxCondSend(pagerMbox,&f,&FAULT_SIZE);
-		P1_Join(&status);
+		P1_P(pagerDone);
 	}
-	
 	P2_MboxRelease(pagerMbox);
+	P1_SemFree(pagerDone);
+	P1_SemFree(FLSem);
+	P1_SemFree(vmStatsSem);
+	P1_SemFree(pagerRunning);
 	pagerMbox = -1;
 	free(frameList);
-	/*
-	 * Print vm statistics.
-	 */
 	P1_P(vmStatsSem);
 	USLOSS_Console("P3_vmStats:\n");
 	USLOSS_Console("pages: %d\n", P3_vmStats.pages);
@@ -259,7 +251,6 @@ void P3_VmDestroy(void) {
 void P3_Fork(int pid)
 {
 	int i;
-
 	CheckMode();
 	CheckPid(pid);
 	if(CheckInit() == VMOFF){
@@ -304,6 +295,7 @@ void P3_Quit(int pid) {
 	 */
 	
 	int i;
+	int status;
 
 	/*
 	Need to handle pages on the swap disk as well. PART B.
@@ -312,7 +304,12 @@ void P3_Quit(int pid) {
 	for(i = 0; i < numPages;i++){
 		/*If this page has a frame in memory, make it unused.*/
 		if(processes[pid].pageTable[i].state == INCORE){
-			frameList[processes[pid].pageTable[i].frame] = UNUSED;		
+			frameList[processes[pid].pageTable[i].frame] = UNUSED;
+			status = USLOSS_MmuUnmap(TAG, i);
+			if (status != USLOSS_MMU_OK) {
+				USLOSS_Console("Unable to unmap page in P3_Quit\n");
+				USLOSS_Halt(1);
+			}		
 			ModifyStats(FFRAMES,1);
 		}
 	}
@@ -365,7 +362,6 @@ void P3_Switch(int old, int new)
 		if (processes[old].pageTable[page].state == INCORE) {
 			status = USLOSS_MmuUnmap(TAG, page);
 			if (status != USLOSS_MMU_OK) {
-				// report error and abort
 				USLOSS_Console("Unable to un-map page.\n");
 				USLOSS_Halt(1);	
 			}
@@ -410,6 +406,7 @@ static void FaultHandler(int type,void *arg)
 	int size;
 	cause = USLOSS_MmuGetCause();
 	ModifyStats(FAULTS,1);
+	ModifyStats(NEW,1);
 	fault.pid = P1_GetPID();
 	fault.addr = arg;
 	fault.mbox = P2_MboxCreate(1, 0);
@@ -456,7 +453,6 @@ int Pager(void *arg) {
 		P1_P(FLSem);
 		newFrame = -1;
 		page = (int)f.addr / (int)pageSize;
-		USLOSS_Console("Page = %d\n",page);
 		for(i = 0 ; i < numFrames; i++){
 			if(frameList[i] == UNUSED){
 				/*Indicate this frame is now in use.*/
@@ -489,7 +485,7 @@ int Pager(void *arg) {
 		/* Unblock waiting (faulting) process */
 		P2_MboxSend(f.mbox, NULL, &size);
 	}
-	/* Never gets here. */
+	P1_V(pagerDone);
 	return 1;
 }
 
