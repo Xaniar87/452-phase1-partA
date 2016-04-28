@@ -85,6 +85,9 @@ static P1_Semaphore pagerRunning;
 static P1_Semaphore pagerDone;
 static int numPagers = -1;
 
+static int clockHand;
+static P1_Semaphore clockSem;
+
 static void CheckPid(int);
 static void CheckMode(void);
 static int CheckInit(void);
@@ -123,12 +126,11 @@ int P3_Startup(void *arg){
  *----------------------------------------------------------------------
  */
 int P3_VmInit(int mappings, int pages, int frames, int pagers) {
-	/*PART A ALWAYS HAVE 1 PAGER.*/
-	pagers = 1;
+	
 	int status;
 	int i;
 	CheckMode();
-	if(mappings != pages){
+	if(mappings != pages || pagers > P3_MAX_PAGERS || pagers <= 0){
 		return -1;
 	}
 	
@@ -177,6 +179,8 @@ int P3_VmInit(int mappings, int pages, int frames, int pagers) {
 	ModifyStats(BLOCKS,(sector * numSectors * tracks) / USLOSS_MmuPageSize());
 	numPages = pages;
 	numFrames = frames;
+	clockHand = 0;
+	clockSem = P1_SemCreate(1);
 	return 0;
 }
 /*
@@ -215,6 +219,7 @@ void P3_VmDestroy(void) {
 	P1_SemFree(FLSem);
 	P1_SemFree(vmStatsSem);
 	P1_SemFree(pagerRunning);
+	P1_SemFree(clockSem);
 	pagerMbox = -1;
 	free(frameList);
 	P1_P(vmStatsSem);
@@ -349,10 +354,6 @@ void P3_Switch(int old, int new)
 	CheckPid(old);
 	CheckPid(new);
 
-	if(CheckInit() == VMOFF){
-		return;
-	}
-
 	ModifyStats(SWITCHES,1);
 	for (page = 0; page < processes[old].numPages; page++) {
 		/*
@@ -453,31 +454,32 @@ int Pager(void *arg) {
 		P1_P(FLSem);
 		newFrame = -1;
 		page = (int)f.addr / (int)pageSize;
-		for(i = 0 ; i < numFrames; i++){
-			if(frameList[i] == UNUSED){
-				/*Indicate this frame is now in use.*/
-				ModifyStats(FFRAMES,-1);
-				newFrame = i;
-				frameList[i] = INCORE;
-				/*Loading this mapping to the pagers MMU mapping.*/
-				//status = USLOSS_MmuMap(TAG, page,newFrame,USLOSS_MMU_PROT_RW);
-				status = USLOSS_MmuMap(TAG, page,newFrame,USLOSS_MMU_PROT_RW);
-				if(status != USLOSS_MMU_OK){
-					USLOSS_Console("Unable to map. status = %d\n",status);
-					USLOSS_Halt(1);			
+		if(processes[f.pid].pageTable[page].state == UNUSED){
+			for(i = 0 ; i < numFrames; i++){
+				if(frameList[i] == UNUSED){
+					/*Indicate this frame is now in use.*/
+					ModifyStats(FFRAMES,-1);
+					newFrame = i;
+					frameList[i] = INCORE;
+					/*Loading this mapping to the pagers MMU mapping.*/
+					status = USLOSS_MmuMap(TAG, page,newFrame,USLOSS_MMU_PROT_RW);
+					if(status != USLOSS_MMU_OK){
+						USLOSS_Console("Unable to map. status = %d\n",status);
+						USLOSS_Halt(1);			
+					}
+					/*Zero this frame.*/
+					startPage = (long) startVM + (page * pageSize);
+					memset((void *)startPage,0,pageSize);
+					status = USLOSS_MmuUnmap(TAG, page);
+                                	if(status != USLOSS_MMU_OK){
+                                        	USLOSS_Console("Unable to un-map. status = %d\n",status);
+                                        	USLOSS_Halt(1);
+                                	}
+					/*Add this frame <--> page mapping to process page table*/
+					processes[f.pid].pageTable[page].frame = newFrame;
+					processes[f.pid].pageTable[page].state = INCORE;	
+					break;
 				}
-				/*Zero this frame.*/
-				startPage = (long) startVM + (page * pageSize);
-				memset((void *)startPage,0,pageSize);
-				status = USLOSS_MmuUnmap(TAG, page);
-                                if(status != USLOSS_MMU_OK){
-                                        USLOSS_Console("Unable to un-map. status = %d\n",status);
-                                        USLOSS_Halt(1);
-                                }
-				/*Add this frame <--> page mapping to process page table*/
-				processes[f.pid].pageTable[page].frame = newFrame;
-				processes[f.pid].pageTable[page].state = INCORE;	
-				break;
 			}
 		}
 		P1_V(FLSem);
