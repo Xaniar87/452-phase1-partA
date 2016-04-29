@@ -1,5 +1,5 @@
 /*
- 452 Phase 3 Part A
+ 452 Phase 3 Part B
  Authors:
  Matt Seall
  Zachary Nixon
@@ -28,6 +28,8 @@
 
 #define SWAP_DISK_NUM 1
 
+#define SECTORS_FOR_FRAME 8
+
 /*
  * Everybody uses the same tag.
  */
@@ -38,14 +40,14 @@
 
 #define UNUSED  0
 #define INCORE  1
+#define ONDISK 2
 /* You'll probably want more states */
 
 /* Page Table Entry */
 typedef struct PTE {
 	int state; /* See above. */
 	int frame; /* The frame that stores the page. */
-	int block; /* The disk block that stores the page. */
-/* Add more stuff here */
+	int index; /*Index of frame struct*/
 } PTE;
 
 /*
@@ -54,14 +56,22 @@ typedef struct PTE {
 typedef struct Process {
 	int numPages; /* Size of the page table. */
 	PTE *pageTable; /* The page table for the process. */
-/* Add more stuff here if necessary. */
 } Process;
 
 static Process processes[P1_MAXPROC];
 static int numPages = 0;
 static int numFrames = 0;
 
+
+
 static int* frameList;
+typedef struct frameStruct{
+	int open; /*0 or 1*/
+	int track; /*Track to find frame 0 to NUM_TRACKS - 1*/
+	int startSector; /*Where to find first byte of frame on disk, either 0 or 8.*/
+} frameStruct;
+static frameStruct* frameStructList;
+static int blocksOnDisk;
 static P1_Semaphore FLSem;
 
 
@@ -86,7 +96,6 @@ static P1_Semaphore pagerDone;
 static int numPagers = -1;
 
 static int clockHand;
-static P1_Semaphore clockSem;
 
 static void CheckPid(int);
 static void CheckMode(void);
@@ -94,6 +103,7 @@ static int CheckInit(void);
 static void ModifyStats(int field,int modifier);
 static void FaultHandler(int type, void *arg);
 static int Pager(void *arg);
+static int ClockAlgo(void);
 
 void P3_Fork(int pid);
 void P3_Switch(int old, int new);
@@ -174,13 +184,25 @@ int P3_VmInit(int mappings, int pages, int frames, int pagers) {
 	int sector;
 	int numSectors;
 	int tracks;
-	P2_DiskSize(SWAP_DISK_NUM,&sector,&numSectors,&tracks);	
-	ModifyStats(FBLOCKS,(sector * numSectors * tracks) / USLOSS_MmuPageSize());
-	ModifyStats(BLOCKS,(sector * numSectors * tracks) / USLOSS_MmuPageSize());
+	P2_DiskSize(SWAP_DISK_NUM,&sector,&numSectors,&tracks);
+	blocksOnDisk = (sector * numSectors * tracks) / USLOSS_MmuPageSize();
+	ModifyStats(FBLOCKS,blocksOnDisk);
+	ModifyStats(BLOCKS,blocksOnDisk);
 	numPages = pages;
 	numFrames = frames;
 	clockHand = 0;
-	clockSem = P1_SemCreate(1);
+	frameStructList = malloc(sizeof(frameStruct) * blocksOnDisk);
+	int trackCounter = 0;
+	for(i = 0; i < blocksOnDisk;i++){
+		frameStructList[i].open = 0;
+		frameStructList[i].track = trackCounter;
+		if(i % 2 == 0){
+			frameStructList[i].startSector = 0;
+		}else{
+			frameStructList[i].startSector = 8;
+			trackCounter++;
+		}
+	}
 	return 0;
 }
 /*
@@ -219,7 +241,6 @@ void P3_VmDestroy(void) {
 	P1_SemFree(FLSem);
 	P1_SemFree(vmStatsSem);
 	P1_SemFree(pagerRunning);
-	P1_SemFree(clockSem);
 	pagerMbox = -1;
 	free(frameList);
 	P1_P(vmStatsSem);
@@ -265,7 +286,7 @@ void P3_Fork(int pid)
 	processes[pid].pageTable = (PTE *) malloc(sizeof(PTE) * numPages);
 	for (i = 0; i < numPages; i++) {
 		processes[pid].pageTable[i].frame = -1;
-		processes[pid].pageTable[i].block = -1;
+		processes[pid].pageTable[i].index = -1;
 		processes[pid].pageTable[i].state = UNUSED;
 	}
 }
@@ -316,6 +337,10 @@ void P3_Quit(int pid) {
 				USLOSS_Halt(1);
 			}		
 			ModifyStats(FFRAMES,1);
+		}else if(processes[pid].pageTable[i].state == ONDISK){
+			int index = processes[pid].pageTable[i].index;
+			frameStructList[index].open = 0;
+			ModifyStats(FBLOCKS,1);
 		}
 	}
 	P1_V(FLSem);
@@ -407,7 +432,6 @@ static void FaultHandler(int type,void *arg)
 	int size;
 	cause = USLOSS_MmuGetCause();
 	ModifyStats(FAULTS,1);
-	ModifyStats(NEW,1);
 	fault.pid = P1_GetPID();
 	fault.addr = arg;
 	fault.mbox = P2_MboxCreate(1, 0);
@@ -445,43 +469,126 @@ int Pager(void *arg) {
 	void *startVM = USLOSS_MmuRegion(&status);
 	int pageSize = USLOSS_MmuPageSize();
 	int page;
+	char *buffer = malloc(pageSize);
 	while (1) {
 		P2_MboxReceive(pagerMbox,&f,&FAULT_SIZE);
 		if(done == 1){
 			break;
 		}
-		/* Find a free frame */
+		page = (int)f.addr / (int)pageSize;
+		startPage = (long) startVM + (page * pageSize);
 		P1_P(FLSem);
 		newFrame = -1;
-		page = (int)f.addr / (int)pageSize;
-		if(processes[f.pid].pageTable[page].state == UNUSED){
-			for(i = 0 ; i < numFrames; i++){
-				if(frameList[i] == UNUSED){
-					/*Indicate this frame is now in use.*/
-					ModifyStats(FFRAMES,-1);
-					newFrame = i;
-					frameList[i] = INCORE;
-					/*Loading this mapping to the pagers MMU mapping.*/
-					status = USLOSS_MmuMap(TAG, page,newFrame,USLOSS_MMU_PROT_RW);
-					if(status != USLOSS_MMU_OK){
-						USLOSS_Console("Unable to map. status = %d\n",status);
-						USLOSS_Halt(1);			
-					}
-					/*Zero this frame.*/
-					startPage = (long) startVM + (page * pageSize);
-					memset((void *)startPage,0,pageSize);
-					status = USLOSS_MmuUnmap(TAG, page);
-                                	if(status != USLOSS_MMU_OK){
-                                        	USLOSS_Console("Unable to un-map. status = %d\n",status);
-                                        	USLOSS_Halt(1);
-                                	}
-					/*Add this frame <--> page mapping to process page table*/
-					processes[f.pid].pageTable[page].frame = newFrame;
-					processes[f.pid].pageTable[page].state = INCORE;	
-					break;
-				}
+		/*Try to find a free frame*/
+		for(i = 0 ; i < numFrames; i++){
+			if(frameList[i] == UNUSED){
+				/*Indicate this frame is now in use.*/
+				ModifyStats(FFRAMES,-1);
+				newFrame = i;
+				frameList[i] = INCORE;
+				break;
 			}
 		}
+
+		/*Couldn't find free frame - evict one*/
+		if(newFrame == -1){
+			newFrame = ClockAlgo();
+			int access;
+			if(USLOSS_MmuGetAccess(clockHand,&access) != USLOSS_MMU_OK){
+				USLOSS_Console("MMU Access returned NOT OK.\n");
+				USLOSS_Halt(1);
+			}
+			/*Write old frame to disk.*/
+			int freeSpace = -1;
+			if((access & USLOSS_MMU_DIRTY) > 0){
+				int i;
+				for(i = 0; i < blocksOnDisk;i++){
+					if(frameStructList[i].open == 0){
+						freeSpace = i;
+						frameStructList[i].open = 1;
+						ModifyStats(FBLOCKS,-1);
+						break;
+					}
+				}
+				if(freeSpace == -1){
+					USLOSS_Console("Could not allocate swap space. Killing process.\n");
+					P1_Quit(0);
+					P1_V(FLSem);
+					continue;
+				}
+				status = USLOSS_MmuMap(TAG, page,newFrame,USLOSS_MMU_PROT_RW);
+				if(status != USLOSS_MMU_OK){
+					USLOSS_Console("Unable to map. status = %d\n",status);
+					USLOSS_Halt(1);
+				}
+				memcpy(buffer,(void *)startPage,pageSize);
+				USLOSS_Console("%c\n",*buffer);
+				status = USLOSS_MmuUnmap(TAG, page);
+				if(status != USLOSS_MMU_OK){
+					USLOSS_Console("Unable to un-map. status = %d\n",status);
+					USLOSS_Halt(1);
+				}
+				ModifyStats(POUTS,1);
+				int rc = P2_DiskWrite(SWAP_DISK_NUM,frameStructList[i].track,frameStructList[i].startSector,SECTORS_FOR_FRAME,buffer);
+				
+				if(rc != 0){
+					USLOSS_Console("P2_DiskRead failed!!!\n");
+				}
+			}
+			int j;
+			for(i = 0; i < P1_MAXPROC;i++){
+				if(processes[i].pageTable == NULL){
+					continue;
+				}
+				for(j = 0; j < numPages;j++){
+					/*Found our victim!!*/
+					if(processes[i].pageTable[j].frame == newFrame){
+						processes[i].pageTable[j].state = ONDISK;
+						processes[i].pageTable[j].index = freeSpace;
+						goto d;
+					}
+				}
+			}
+
+		}
+		d:
+		if(processes[f.pid].pageTable[page].state == UNUSED){
+			/*Loading this mapping to the pagers MMU mapping.*/
+			status = USLOSS_MmuMap(TAG, page,newFrame,USLOSS_MMU_PROT_RW);
+			if(status != USLOSS_MMU_OK){
+				USLOSS_Console("Unable to map. status = %d\n",status);
+				USLOSS_Halt(1);
+			}
+			memset((void *)startPage,0,pageSize);
+			status = USLOSS_MmuUnmap(TAG, page);
+			if(status != USLOSS_MMU_OK){
+				USLOSS_Console("Unable to un-map. status = %d\n",status);
+				USLOSS_Halt(1);
+			}
+		}else{
+			/*Read page from disc into this frame.*/
+			int index = processes[f.pid].pageTable->index;
+			ModifyStats(PINS,1);
+			int rc = P2_DiskRead(SWAP_DISK_NUM,frameStructList[index].track,frameStructList[index].startSector,SECTORS_FOR_FRAME,buffer);
+			if(rc != 0){
+				USLOSS_Console("P2_DiskRead failed!!\n");
+			}
+			status = USLOSS_MmuMap(TAG, page,newFrame,USLOSS_MMU_PROT_RW);
+			if(status != USLOSS_MMU_OK){
+				USLOSS_Console("Unable to map. status = %d\n",status);
+				USLOSS_Halt(1);
+			}
+			startPage = (long) startVM + (page * pageSize);
+			memcpy((void *)startPage,buffer,pageSize);
+			status = USLOSS_MmuUnmap(TAG, page);
+			if(status != USLOSS_MMU_OK){
+				USLOSS_Console("Unable to un-map. status = %d\n",status);
+				USLOSS_Halt(1);
+			}
+		}
+		/*Add this frame <--> page mapping to process page table*/
+		processes[f.pid].pageTable[page].frame = newFrame;
+		processes[f.pid].pageTable[page].state = INCORE;
 		P1_V(FLSem);
 		/* If there isn't one run clock algorithm, write page to disk if necessary */
 		/* Unblock waiting (faulting) process */
@@ -543,4 +650,23 @@ static void ModifyStats(int field,int modifier){
 	break;
 	}
 	P1_V(vmStatsSem);	
+}
+
+static int ClockAlgo(void){
+	int victim;
+	int access;
+	while(1){
+		if(USLOSS_MmuGetAccess(clockHand,&access) != USLOSS_MMU_OK){
+			USLOSS_Console("MMU Access returned NOT OK.\n");
+			USLOSS_Halt(1);
+		}
+		if((access & USLOSS_MMU_REF) == 0){
+			victim = clockHand;
+			clockHand = (clockHand + 1) % numFrames;
+			return victim;
+		}else{
+			USLOSS_MmuSetAccess(clockHand,access & ~(USLOSS_MMU_REF));
+			clockHand = (clockHand + 1) % numFrames;
+		}
+	}
 }
