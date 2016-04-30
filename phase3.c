@@ -243,6 +243,7 @@ void P3_VmDestroy(void) {
 	P1_SemFree(pagerRunning);
 	pagerMbox = -1;
 	free(frameList);
+	free(frameStructList);
 	P1_P(vmStatsSem);
 	USLOSS_Console("P3_vmStats:\n");
 	USLOSS_Console("pages: %d\n", P3_vmStats.pages);
@@ -381,6 +382,9 @@ void P3_Switch(int old, int new)
 
 	ModifyStats(SWITCHES,1);
 	for (page = 0; page < processes[old].numPages; page++) {
+		if(processes[old].pageTable == NULL){
+			break;
+		}
 		/*
 		 * If a page of the old process is in memory then a mapping
 		 * for it must be in the MMU. Remove it.
@@ -394,6 +398,9 @@ void P3_Switch(int old, int new)
 		}
 	}
 	for (page = 0; page < processes[new].numPages; page++) {
+		if(processes[new].pageTable == NULL){
+			break;
+		}
 		/*
 		 * If a page of the new process is in memory then add a mapping
 		 * for it to the MMU.
@@ -471,7 +478,9 @@ int Pager(void *arg) {
 	int page;
 	char *buffer = malloc(pageSize);
 	while (1) {
+		//USLOSS_Console("--->%d\n",(USLOSS_PsrGet() & USLOSS_PSR_CURRENT_MODE));
 		P2_MboxReceive(pagerMbox,&f,&FAULT_SIZE);
+		//USLOSS_Console("After!!\n");
 		if(done == 1){
 			break;
 		}
@@ -522,17 +531,16 @@ int Pager(void *arg) {
 					USLOSS_Halt(1);
 				}
 				memcpy(buffer,(void *)startPage,pageSize);
-				USLOSS_Console("%c\n",*buffer);
 				status = USLOSS_MmuUnmap(TAG, page);
 				if(status != USLOSS_MMU_OK){
 					USLOSS_Console("Unable to un-map. status = %d\n",status);
 					USLOSS_Halt(1);
 				}
 				ModifyStats(POUTS,1);
-				int rc = P2_DiskWrite(SWAP_DISK_NUM,frameStructList[i].track,frameStructList[i].startSector,SECTORS_FOR_FRAME,buffer);
-				
+				int rc = P2_DiskWrite(SWAP_DISK_NUM,frameStructList[i].track,frameStructList[i].startSector,SECTORS_FOR_FRAME - 1,buffer);
 				if(rc != 0){
-					USLOSS_Console("P2_DiskRead failed!!!\n");
+					USLOSS_Console("P2_DiskWrite failed!!!\n");
+					USLOSS_Halt(1);
 				}
 			}
 			int j;
@@ -542,7 +550,7 @@ int Pager(void *arg) {
 				}
 				for(j = 0; j < numPages;j++){
 					/*Found our victim!!*/
-					if(processes[i].pageTable[j].frame == newFrame){
+					if(processes[i].pageTable[j].state == INCORE && processes[i].pageTable[j].frame == newFrame){
 						processes[i].pageTable[j].state = ONDISK;
 						processes[i].pageTable[j].index = freeSpace;
 						goto d;
@@ -554,6 +562,7 @@ int Pager(void *arg) {
 		d:
 		if(processes[f.pid].pageTable[page].state == UNUSED){
 			/*Loading this mapping to the pagers MMU mapping.*/
+			ModifyStats(NEW,1);
 			status = USLOSS_MmuMap(TAG, page,newFrame,USLOSS_MMU_PROT_RW);
 			if(status != USLOSS_MMU_OK){
 				USLOSS_Console("Unable to map. status = %d\n",status);
@@ -572,6 +581,7 @@ int Pager(void *arg) {
 			int rc = P2_DiskRead(SWAP_DISK_NUM,frameStructList[index].track,frameStructList[index].startSector,SECTORS_FOR_FRAME,buffer);
 			if(rc != 0){
 				USLOSS_Console("P2_DiskRead failed!!\n");
+				USLOSS_Halt(1);
 			}
 			status = USLOSS_MmuMap(TAG, page,newFrame,USLOSS_MMU_PROT_RW);
 			if(status != USLOSS_MMU_OK){
@@ -585,13 +595,12 @@ int Pager(void *arg) {
 				USLOSS_Console("Unable to un-map. status = %d\n",status);
 				USLOSS_Halt(1);
 			}
+			frameStructList[index].open = 0;
 		}
 		/*Add this frame <--> page mapping to process page table*/
 		processes[f.pid].pageTable[page].frame = newFrame;
 		processes[f.pid].pageTable[page].state = INCORE;
 		P1_V(FLSem);
-		/* If there isn't one run clock algorithm, write page to disk if necessary */
-		/* Unblock waiting (faulting) process */
 		P2_MboxSend(f.mbox, NULL, &size);
 	}
 	P1_V(pagerDone);
